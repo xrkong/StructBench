@@ -416,6 +416,11 @@ def build_transolver_simulator(
         # (train) / evaluate reads the resolved integer from config.json, so a
         # 0 never reaches here.
         frames_per_call=cfg.frames_per_call,
+        # Design A hybrid local MP branch (off by default = vanilla Transolver).
+        hybrid_mp=cfg.hybrid_mp,
+        hybrid_radius=cfg.hybrid_radius,
+        hybrid_max_neighbors=cfg.hybrid_max_neighbors,
+        hybrid_blocks=cfg.hybrid_blocks,
         kinematic_types=kinematic_types,
         **({} if scripted_types is None else {"scripted_types": scripted_types}),
         device=device,
@@ -1548,9 +1553,25 @@ def _train_transolver(
         shuffle=True,
         collate_fn=functools.partial(collate_mesh_samples, statics=statics),
     )
-    optimizer = torch.optim.AdamW(
-        sim.parameters(), lr=train_cfg.lr_init, weight_decay=cfg.weight_decay
-    )
+    # Design A (ADR hybrid): exclude the MP-branch gate + message-passing
+    # params from weight decay (G3-P3 §2d — decaying the LayerScale gate back
+    # toward 0 starves the branch). With hybrid_mp off, hybrid_no_decay_parameters
+    # returns [] and this reduces to the single-group vanilla recipe (unchanged).
+    no_decay = sim.hybrid_no_decay_parameters()
+    if no_decay:
+        no_decay_ids = {id(p) for p in no_decay}
+        decay_params = [p for p in sim.parameters() if id(p) not in no_decay_ids]
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": decay_params, "weight_decay": cfg.weight_decay},
+                {"params": no_decay, "weight_decay": 0.0},
+            ],
+            lr=train_cfg.lr_init,
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            sim.parameters(), lr=train_cfg.lr_init, weight_decay=cfg.weight_decay
+        )
 
     regime = (
         " (autoregressive)"

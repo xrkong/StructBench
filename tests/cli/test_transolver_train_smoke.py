@@ -84,7 +84,7 @@ def _write_cases(root, ids):
         write_case(case, root / f"{cid}.h5")
 
 
-def _run_transolver_smoke(tmp_path, *, frames_per_call: int = 1):
+def _run_transolver_smoke(tmp_path, *, frames_per_call: int = 1, **cfg_overrides):
     """Shared spec/data/train setup for both smoke tests below.
 
     Builds the tiny synthetic mesh benchmark, writes its cases, and runs a
@@ -110,14 +110,16 @@ def _run_transolver_smoke(tmp_path, *, frames_per_call: int = 1):
     data_root.mkdir()
     _write_cases(data_root, [c for v in ids.values() for c in v])
 
-    cfg = TransolverConfig(
-        hidden_dim=16,
-        n_layers=2,
-        n_heads=2,
-        slice_num=8,
-        normalizer_warmup_steps=5,
-        frames_per_call=frames_per_call,
-    )
+    cfg_kw = {
+        "hidden_dim": 16,
+        "n_layers": 2,
+        "n_heads": 2,
+        "slice_num": 8,
+        "normalizer_warmup_steps": 5,
+        "frames_per_call": frames_per_call,
+        **cfg_overrides,  # test-supplied overrides win over the defaults above
+    }
+    cfg = TransolverConfig(**cfg_kw)
     tcfg = TrainConfig(
         benchmark="TransolverSmoke",
         batch_size=2,
@@ -255,6 +257,42 @@ def test_transolver_pushforward_bundling_train_and_evaluate_smoke(
     record = json.loads((out / "config.json").read_text(encoding="utf-8"))
     # An explicit 1<k<T is recorded verbatim (only the k=T sentinel is resolved).
     assert record["model"]["frames_per_call"] == 2
+
+    ckpts = list(out.glob("model-*.pt"))
+    assert any(p.name.startswith("model-best-") for p in ckpts), "no val pass ran"
+
+    monkeypatch.setattr(cli_train, "get_benchmark", lambda name: spec)
+    metrics = cli_train.evaluate(ids["val"], data_root, out, "cpu", split_name="val")
+    per_case = metrics["cases"][ids["val"][0]]
+    assert np.isfinite(per_case["one_step_position_rmse"])
+    assert np.isfinite(per_case["rollout_position_rmse"])
+    assert np.isfinite(per_case["rollout_aux_rmse"])
+
+
+def test_transolver_hybrid_train_and_evaluate_smoke(tmp_path, monkeypatch):
+    """Design A hybrid end-to-end: train() with hybrid_mp=true, then evaluate().
+
+    Exercises the whole hybrid training path — the per-example radius graph
+    built inside the batched ``forward_train``, the weight-decay-excluded MP
+    param group, and the eval-path graph built inside ``predict_positions`` —
+    on the tiny synthetic mesh benchmark, through a validation pass and the
+    ``evaluate()`` rollout. ``n_layers=4`` so a middle block exists to carry
+    the branch (the smoke default n_layers=2 has none).
+    """
+    import structbench.cli.train as cli_train
+
+    spec, data_root, out, _cfg, _tcfg, ids = _run_transolver_smoke(
+        tmp_path,
+        n_layers=4,
+        hybrid_mp=True,
+        hybrid_radius=0.5,
+        hybrid_max_neighbors=8,
+        hybrid_blocks=1,
+    )
+
+    record = json.loads((out / "config.json").read_text(encoding="utf-8"))
+    assert record["model"]["hybrid_mp"] is True
+    assert record["model"]["hybrid_radius"] == 0.5
 
     ckpts = list(out.glob("model-*.pt"))
     assert any(p.name.startswith("model-best-") for p in ckpts), "no val pass ran"

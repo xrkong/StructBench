@@ -38,6 +38,16 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
+from ..mgn.network import build_mlp
+
+#: LayerScale-style init for the hybrid MP gate (G3-P3 §2d). Small NONZERO
+#: (per-channel), NOT exactly 0: an exactly-0 gate gives the MP-branch
+#: parameters zero gradient at step 0 (grad ∝ gate), and with weight decay on
+#: the gate it can be pulled back to 0 and never engage — the "plain-Transolver
+#: wearing a costume" failure. A small nonzero value lets the branch receive
+#: gradient immediately (verified by the CPU smoke's grad-norm assertion).
+_HYBRID_GATE_INIT = 1e-3
+
 
 def build_mlp_2layer(in_size: int, hidden: int, out_size: int) -> nn.Sequential:
     """Build the thuml ``MLP(..., n_layers=0)`` shape: a plain 2-layer MLP.
@@ -213,6 +223,123 @@ class PhysicsAttentionIrregularMesh(nn.Module):
         return self.to_out(torch.cat(outs, dim=0))
 
 
+class LocalMessagePassing(nn.Module):
+    """One MGN-style residual message-passing sublayer (Design A local branch).
+
+    Distills :meth:`structbench.models.mgn.network.MGNet.processor_block` to a
+    SINGLE dynamic edge set (there is only one radius graph here, no mesh/world
+    split): an edge MLP on ``[edge_feats, fx[sender], fx[receiver]]``, a
+    receiver-side ``index_add_`` aggregation, and a node MLP on
+    ``[fx, agg]``. Reuses :func:`~structbench.models.mgn.network.build_mlp`.
+
+    The aggregate is **mean-normalized** (divided by per-node in-degree,
+    clamped to ``>= 1``), NOT summed. MGN sums, tolerating the degree-driven
+    variance because it is trained end-to-end around it; grafted onto the
+    frozen operator backbone, a raw sum injects high variance wherever degree
+    swings (Taylor's mushroom-foot compaction spikes degree 10-100x), which
+    would destabilize the operator's interpolation win when the gate opens
+    (G3-P3 §3b). Mean-normalization removes that coupling.
+
+    Returns the raw update (no residual); the caller applies the gated
+    residual ``fx = gate * mp(ln_local(fx), ...) + fx``.
+
+    Parameters
+    ----------
+    hidden_dim:
+        Node latent width ``C`` (input and output of this sublayer).
+    edge_in:
+        Edge-feature width (``dim + 1`` for ``[x_ij, |x_ij|]``).
+    n_hidden:
+        Hidden layers in each sub-MLP (MGN parity default 2).
+    """
+
+    def __init__(self, hidden_dim: int, edge_in: int, n_hidden: int = 2) -> None:
+        super().__init__()
+        self._hidden = hidden_dim
+        self.edge_mlp = build_mlp(
+            edge_in + 2 * hidden_dim, hidden_dim, n_hidden, hidden_dim, layer_norm=True
+        )
+        self.node_mlp = build_mlp(
+            2 * hidden_dim, hidden_dim, n_hidden, hidden_dim, layer_norm=True
+        )
+
+    def forward(self, fx: Tensor, edge_index: Tensor, edge_feats: Tensor) -> Tensor:
+        """Compute the local MP update.
+
+        Parameters
+        ----------
+        fx:
+            ``(P, hidden_dim)`` node latents (already LayerNorm'd by the block).
+        edge_index:
+            ``(2, E)`` int64 index; row 0 sender, row 1 receiver.
+        edge_feats:
+            ``(E, edge_in)`` relative-position edge features.
+
+        Returns
+        -------
+        Tensor
+            ``(P, hidden_dim)`` node update (pre-residual, pre-gate).
+        """
+        sender, receiver = edge_index[0], edge_index[1]
+        n = fx.shape[0]
+        edge_in = torch.cat([edge_feats, fx[sender], fx[receiver]], dim=-1)
+        msg = self.edge_mlp(edge_in)  # (E, hidden)
+        agg = fx.new_zeros(n, self._hidden)
+        agg.index_add_(0, receiver, msg)
+        # Mean-normalize by in-degree (clamp_min 1 keeps isolated nodes finite).
+        deg = fx.new_zeros(n, 1)
+        deg.index_add_(0, receiver, fx.new_ones(edge_index.shape[1], 1))
+        agg = agg / deg.clamp_min(1.0)
+        return self.node_mlp(torch.cat([fx, agg], dim=-1))
+
+
+def hybrid_block_indices(n_layers: int, count: int) -> set[int]:
+    """Which block indices carry the local MP branch: ``count`` MIDDLE blocks.
+
+    Never block 0 (rawest features) and never the last block (it carries the
+    no-residual decoder head — putting MP there would either MP the decoded
+    output at the wrong width or drop the MP residual; the G3-P3 §2e wiring
+    trap). Blocks are picked centered on ``n_layers // 2`` and expanded
+    outward symmetrically.
+
+    Parameters
+    ----------
+    n_layers:
+        Total number of blocks ``L``.
+    count:
+        Number of middle blocks to place the MP branch on (``0`` = none).
+
+    Returns
+    -------
+    set[int]
+        Selected block indices, all in ``[1, n_layers - 2]``.
+
+    Raises
+    ------
+    ValueError
+        If ``count`` exceeds the ``n_layers - 2`` available middle blocks.
+    """
+    if count <= 0:
+        return set()
+    available = n_layers - 2
+    if count > available:
+        raise ValueError(
+            f"hybrid_blocks={count} exceeds the {available} available middle "
+            f"blocks for n_layers={n_layers} (block 0 and the last decoder "
+            "block are excluded)"
+        )
+    center = n_layers // 2
+    order = [center]
+    d = 1
+    while len(order) < count:
+        if center - d >= 1:
+            order.append(center - d)
+        if center + d <= n_layers - 2:
+            order.append(center + d)
+        d += 1
+    return set(order[:count])
+
+
 class TransolverBlock(nn.Module):
     """One pre-LN Transolver block (Eq 6): Physics-Attention + FFN, both residual.
 
@@ -240,6 +367,15 @@ class TransolverBlock(nn.Module):
     out_size:
         Output feature width of the decoder head (only used when
         ``last_layer``).
+    hybrid_mp:
+        If ``True``, this block gains a parallel local message-passing residual
+        branch (Design A). Only ever set on MIDDLE blocks (never block 0 or the
+        last/decoder block; see :func:`hybrid_block_indices`).
+    hybrid_edge_in:
+        Edge-feature width for the MP branch (``dim + 1``); only used when
+        ``hybrid_mp``.
+    hybrid_n_hidden:
+        Hidden layers in the MP branch's sub-MLPs; only used when ``hybrid_mp``.
     """
 
     def __init__(
@@ -251,9 +387,13 @@ class TransolverBlock(nn.Module):
         dropout: float,
         last_layer: bool,
         out_size: int,
+        hybrid_mp: bool = False,
+        hybrid_edge_in: int = 0,
+        hybrid_n_hidden: int = 2,
     ) -> None:
         super().__init__()
         self.last_layer = last_layer
+        self.hybrid_mp = hybrid_mp
         dim_head = hidden_dim // heads
         self.ln_1 = nn.LayerNorm(hidden_dim)
         self.attn = PhysicsAttentionIrregularMesh(
@@ -265,11 +405,30 @@ class TransolverBlock(nn.Module):
         )
         self.ln_2 = nn.LayerNorm(hidden_dim)
         self.mlp = build_mlp_2layer(hidden_dim, hidden_dim * mlp_ratio, hidden_dim)
+        if hybrid_mp:
+            if last_layer:
+                # Belt-and-braces: the decoder block returns the decoded tensor
+                # with no residual, so an MP branch here would be malformed
+                # (hybrid_block_indices already excludes it).
+                raise ValueError("hybrid_mp must not be placed on the last block")
+            self.ln_local = nn.LayerNorm(hidden_dim)
+            self.mp = LocalMessagePassing(
+                hidden_dim, hybrid_edge_in, n_hidden=hybrid_n_hidden
+            )
+            # Per-channel LayerScale gate, small nonzero init (see module const).
+            self.mp_gate = nn.Parameter(
+                torch.full((hidden_dim,), _HYBRID_GATE_INIT)
+            )
         if last_layer:
             self.ln_3 = nn.LayerNorm(hidden_dim)
             self.mlp2 = nn.Linear(hidden_dim, out_size)
 
-    def forward(self, fx: Tensor, segments: list[tuple[int, int]]) -> Tensor:
+    def forward(
+        self,
+        fx: Tensor,
+        segments: list[tuple[int, int]],
+        graph: tuple[Tensor, Tensor] | None = None,
+    ) -> Tensor:
         """Apply the block.
 
         Parameters
@@ -280,6 +439,10 @@ class TransolverBlock(nn.Module):
             Contiguous per-example ``(start, end)`` index pairs, precomputed
             once by ``TransolverNet.forward`` and forwarded unchanged to
             ``attn`` (see :meth:`PhysicsAttentionIrregularMesh.forward`).
+        graph:
+            ``(edge_index (2, E), edge_feats (E, hybrid_edge_in))`` for the
+            local MP branch, or ``None``. Required (non-``None``) exactly when
+            ``hybrid_mp`` is set; ignored otherwise.
 
         Returns
         -------
@@ -288,6 +451,14 @@ class TransolverBlock(nn.Module):
             is the last block (decoder head applied, no residual).
         """
         fx = self.attn(self.ln_1(fx), segments) + fx
+        if self.hybrid_mp:
+            if graph is None:
+                raise ValueError(
+                    "hybrid_mp block requires a graph=(edge_index, edge_feats); "
+                    "got None"
+                )
+            edge_index, edge_feats = graph
+            fx = self.mp_gate * self.mp(self.ln_local(fx), edge_index, edge_feats) + fx
         fx = self.mlp(self.ln_2(fx)) + fx
         if self.last_layer:
             return self.mlp2(self.ln_3(fx))
@@ -341,6 +512,20 @@ class TransolverNet(nn.Module):
         FFN hidden-width multiplier inside each block.
     dropout:
         Dropout probability, forwarded to every block.
+    hybrid_mp:
+        Enable the Design A local message-passing branch on ``hybrid_blocks``
+        MIDDLE blocks. ``False`` (default) is byte-identical vanilla
+        Transolver — no MP submodules are created, and passing ``graph=None``
+        to :meth:`forward` reproduces the pre-hybrid forward exactly, so
+        existing checkpoints and tests are unaffected.
+    hybrid_blocks:
+        Number of middle blocks that carry the MP branch (only when
+        ``hybrid_mp``); placed by :func:`hybrid_block_indices`.
+    hybrid_edge_in:
+        Edge-feature width of the MP branch (``dim + 1``; only when
+        ``hybrid_mp``).
+    hybrid_n_hidden:
+        Hidden layers in the MP branch's sub-MLPs (only when ``hybrid_mp``).
     """
 
     def __init__(
@@ -353,8 +538,16 @@ class TransolverNet(nn.Module):
         slice_num: int = 64,
         mlp_ratio: int = 1,
         dropout: float = 0.0,
+        hybrid_mp: bool = False,
+        hybrid_blocks: int = 0,
+        hybrid_edge_in: int = 0,
+        hybrid_n_hidden: int = 2,
     ) -> None:
         super().__init__()
+        self.hybrid_mp = hybrid_mp
+        mp_blocks = (
+            hybrid_block_indices(n_layers, hybrid_blocks) if hybrid_mp else set()
+        )
         self.preprocess = build_mlp_2layer(node_in, hidden_dim * 2, hidden_dim)
         # thuml Irregular_Mesh: added UNCONDITIONALLY (unlike the Structured
         # variants, where it is nested inside an `if fx is None` branch and
@@ -370,6 +563,9 @@ class TransolverNet(nn.Module):
                     dropout,
                     last_layer=(i == n_layers - 1),
                     out_size=out_size,
+                    hybrid_mp=(i in mp_blocks),
+                    hybrid_edge_in=hybrid_edge_in,
+                    hybrid_n_hidden=hybrid_n_hidden,
                 )
                 for i in range(n_layers)
             ]
@@ -377,7 +573,10 @@ class TransolverNet(nn.Module):
         self._initialize_weights()
 
     def forward(
-        self, node_feats: Tensor, n_particles_per_example: Tensor | None
+        self,
+        node_feats: Tensor,
+        n_particles_per_example: Tensor | None,
+        graph: tuple[Tensor, Tensor] | None = None,
     ) -> Tensor:
         """Run the full forward pass.
 
@@ -389,19 +588,30 @@ class TransolverNet(nn.Module):
         n_particles_per_example:
             ``(B,)`` particle counts per example, in concatenation order, or
             ``None`` for a single example.
+        graph:
+            Optional ``(edge_index (2, E), edge_feats (E, hybrid_edge_in))`` for
+            the hybrid MP branch, built once per step in the simulator and
+            reused across every hybrid block. ``None`` (default) reproduces
+            vanilla Transolver byte-for-byte; it is required (non-``None``)
+            when the net was built with ``hybrid_mp=True``.
 
         Returns
         -------
         Tensor
             ``(P, out_size)`` decoded per-node output.
         """
+        if self.hybrid_mp and graph is None:
+            raise ValueError(
+                "TransolverNet built with hybrid_mp=True requires a "
+                "graph=(edge_index, edge_feats); got None"
+            )
         # Hoisted out of the per-block attention call: torch.cumsum(...)
         # .tolist() forces a host<->device sync, so compute segments ONCE
         # here rather than once per block (n_layers=8 at reference depth).
         segments = _segments(node_feats.shape[0], n_particles_per_example)
         fx = self.preprocess(node_feats) + self.placeholder
         for block in self.blocks:
-            fx = block(fx, segments)
+            fx = block(fx, segments, graph)
         return fx
 
     def _initialize_weights(self) -> None:

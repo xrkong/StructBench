@@ -255,6 +255,10 @@ weight_decay = 1e-5
 max_grad_norm = 0.1
 velocity_history = false
 frames_per_call = 1
+hybrid_mp = false
+hybrid_radius = 0.0
+hybrid_max_neighbors = 32
+hybrid_blocks = 1
 
 [train]
 batch_size = 8
@@ -339,6 +343,50 @@ def test_load_deforming_plate_transolver_smoke_config():
     assert rc.model.input_frames == 2
     assert rc.model.hidden_dim == 16
     assert rc.train.training_steps == 50
+
+
+def test_load_run_config_rejects_hybrid_mp_without_radius(tmp_path):
+    # Design A guard: hybrid_mp=true needs a positive radius (the local branch
+    # has no graph otherwise), caught at load with a clear message.
+    bad = VALID_TRANSOLVER.replace("hybrid_mp = false", "hybrid_mp = true")
+    with pytest.raises(ConfigError, match="hybrid_mp=true requires hybrid_radius"):
+        load_run_config(_write(tmp_path, bad))
+
+
+def test_load_run_config_accepts_hybrid_mp_with_radius(tmp_path):
+    cfg = VALID_TRANSOLVER.replace("hybrid_mp = false", "hybrid_mp = true").replace(
+        "hybrid_radius = 0.0", "hybrid_radius = 1.5"
+    )
+    rc = load_run_config(_write(tmp_path, cfg))
+    assert rc.model.hybrid_mp is True
+    assert rc.model.hybrid_radius == 1.5
+    assert rc.model.hybrid_blocks == 1
+
+
+def test_load_taylor_hybrid_configs():
+    for seed, name in ((1, "transolver-hybrid-s1"), (2, "transolver-hybrid-s2")):
+        rc = load_run_config(
+            REPO_ROOT / "configs" / "taylor_impact_2d" / f"{name}.toml"
+        )
+        assert rc.family == "transolver"
+        assert isinstance(rc.model, TransolverConfig)
+        assert rc.model.hybrid_mp is True
+        assert rc.model.hybrid_radius == 1.5
+        assert rc.model.velocity_history is True
+        assert rc.train.seed == seed
+        assert rc.train.training_steps == 60_000
+
+
+def test_load_notch_hybrid_config():
+    rc = load_run_config(
+        REPO_ROOT / "configs" / "notch_beam_2d_impact" / "transolver-hybrid.toml"
+    )
+    assert rc.family == "transolver"
+    assert rc.model.hybrid_mp is True
+    assert rc.model.hybrid_radius == 7.5
+    assert rc.model.velocity_history is True
+    assert rc.train.training_steps == 60_000
+    assert rc.train.train_frames == 250
 
 
 #: A complete, valid GeoFLARE grouped config (deforming_plate card input_frames=2).

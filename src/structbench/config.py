@@ -236,6 +236,28 @@ class TransolverConfig:
         ``frames_per_call * (dim + 1)``, so a checkpoint's ``k`` is fixed at
         train time; k>1 is a Transolver-only scheme (the neural-CFL audit in
         ADR-0051 keeps message-passing backbones at k=1).
+    hybrid_mp : bool
+        Enable the Design A hybrid local message-passing branch: a middle-block
+        MGN-style residual (edge MLP → mean-normalized aggregate → node MLP) on
+        a dynamic k-capped radius graph, parallel to Physics-Attention. ``False``
+        (default) is byte-identical vanilla Transolver — no MP submodules are
+        built and the graph argument stays ``None``, so existing checkpoints and
+        tests load unchanged. Motivated by the notch off-grid probe gap
+        (operators lose the one-step/representation battle ~2.4x to MGN's
+        translation-invariant local pathway; the probe-diagnostic ADR). Requires
+        ``hybrid_radius > 0``.
+    hybrid_radius : float
+        Radius (working-frame units) of the MP branch's dynamic graph. Only used
+        when ``hybrid_mp``; must be positive then. ``0.0`` (default) is the
+        inert value for the vanilla path.
+    hybrid_max_neighbors : int
+        Per-node incoming-edge cap of the radius graph (bounds ``E <= P*k`` so a
+        contact-dense frame cannot blow up the edge activations, unlike MGN's
+        uncapped world edges). Only used when ``hybrid_mp``.
+    hybrid_blocks : int
+        Number of MIDDLE blocks that carry the MP branch (never block 0 or the
+        decoder block). Default ``1`` (the minimal intervention: one middle
+        block). Only used when ``hybrid_mp``.
     """
 
     input_frames: int = 2
@@ -253,6 +275,10 @@ class TransolverConfig:
     max_grad_norm: float = 0.1
     velocity_history: bool = False
     frames_per_call: int = 1
+    hybrid_mp: bool = False
+    hybrid_radius: float = 0.0
+    hybrid_max_neighbors: int = 32
+    hybrid_blocks: int = 1
 
 
 @dataclass
@@ -661,6 +687,16 @@ def load_run_config(path: str | Path) -> ResolvedRunConfig:
         raise ConfigError(
             f"[model] frames_per_call must be >= 0 (0 = one-shot k=T sentinel, "
             f"k>=1 = frames predicted per forward call); got {frames_per_call}"
+        )
+
+    # Design A hybrid MP branch: the local track needs a graph, so a positive
+    # radius is mandatory when it is enabled (guarded here at load rather than
+    # deep in simulator construction).
+    if getattr(model, "hybrid_mp", False) and getattr(model, "hybrid_radius", 0.0) <= 0:
+        raise ConfigError(
+            "[model] hybrid_mp=true requires hybrid_radius > 0 (the local "
+            f"message-passing branch has no graph otherwise); got "
+            f"hybrid_radius={getattr(model, 'hybrid_radius', 0.0)}"
         )
 
     return ResolvedRunConfig(

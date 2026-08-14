@@ -27,6 +27,7 @@ from torch import Tensor
 
 from ..common import CaseBoundSimulator
 from ..mgn.normalizers import OnlineNormalizer
+from .graph_ops import build_radius_graph
 from .network import TransolverNet
 
 
@@ -100,6 +101,10 @@ class TransolverSimulator(CaseBoundSimulator):
         scripted_types: tuple[int, ...] = (1,),
         history_velocities: int = 0,
         frames_per_call: int = 1,
+        hybrid_mp: bool = False,
+        hybrid_radius: float = 0.0,
+        hybrid_max_neighbors: int = 32,
+        hybrid_blocks: int = 1,
         device: str | torch.device = "cpu",
     ) -> None:
         super().__init__(
@@ -131,6 +136,19 @@ class TransolverSimulator(CaseBoundSimulator):
         self._k = frames_per_call
         node_in = node_type_size + 3 * dim + history_velocities * dim
 
+        # Design A hybrid local message-passing branch (off by default =>
+        # byte-identical vanilla Transolver). When on, the simulator builds a
+        # k-capped radius graph once per step from the current positions and
+        # threads it to the net; hybrid_mp REQUIRES a positive radius.
+        if hybrid_mp and hybrid_radius <= 0.0:
+            raise ValueError(
+                f"hybrid_mp=True requires hybrid_radius > 0 (got {hybrid_radius}); "
+                "the local branch has no graph to run on otherwise"
+            )
+        self._hybrid_mp = hybrid_mp
+        self._hybrid_radius = hybrid_radius
+        self._hybrid_max_neighbors = hybrid_max_neighbors
+
         self._net = TransolverNet(
             node_in=node_in,
             out_size=frames_per_call * (dim + 1),
@@ -140,6 +158,9 @@ class TransolverSimulator(CaseBoundSimulator):
             slice_num=slice_num,
             mlp_ratio=mlp_ratio,
             dropout=dropout,
+            hybrid_mp=hybrid_mp,
+            hybrid_blocks=hybrid_blocks,
+            hybrid_edge_in=dim + 1,
         )
         self._node_normalizer = OnlineNormalizer(node_in)
         self._target_normalizer = OnlineNormalizer(dim + 1)
@@ -156,6 +177,35 @@ class TransolverSimulator(CaseBoundSimulator):
         Families that never bundle simply do not expose this attribute.
         """
         return self._k
+
+    def hybrid_no_decay_parameters(self) -> list[torch.nn.Parameter]:
+        """MP-branch parameters to EXCLUDE from AdamW weight decay.
+
+        The gate above all (G3-P3 §2d): weight-decaying the LayerScale gate
+        pulls it back toward 0 and starves the MP branch, the "plain-Transolver
+        wearing a costume" failure. The MP sub-MLPs and its LayerNorm are
+        excluded on the same principle (the branch should be discovered by the
+        data, not regularized away before it engages). Empty when ``hybrid_mp``
+        is off, so the vanilla optimizer recipe is untouched.
+        """
+        if not self._hybrid_mp:
+            return []
+        params: list[torch.nn.Parameter] = []
+        for block in self._net.blocks:
+            if not getattr(block, "hybrid_mp", False):
+                continue
+            # The MP branch's params: the gate, the message-passing sub-MLPs
+            # (``mp.*``), and its pre-branch LayerNorm (``ln_local.*``). Matched
+            # by name off ``named_parameters`` (typed as Parameter, unlike the
+            # ModuleList attribute access mypy widens to Tensor | Module).
+            for name, p in block.named_parameters():
+                if (
+                    name == "mp_gate"
+                    or name.startswith("mp.")
+                    or name.startswith("ln_local.")
+                ):
+                    params.append(p)
+        return params
 
     def _features(
         self,
@@ -208,6 +258,24 @@ class TransolverSimulator(CaseBoundSimulator):
                 )
             parts.append(velocity_history)
         return torch.cat(parts, dim=-1)
+
+    def _build_graph(
+        self, positions: Tensor, n_per: Tensor | None
+    ) -> tuple[Tensor, Tensor] | None:
+        """Build the hybrid MP branch's radius graph, or ``None`` when disabled.
+
+        Built once per step from the current positions (``x_t`` on the eval
+        path, ``x_last`` on the train path) and reused across every hybrid
+        block. Constructed under ``no_grad`` — the edge index and relative-
+        position edge features are geometric constants of this step (positions
+        do not require gradient), exactly as MGN's world-edge features are.
+        """
+        if not self._hybrid_mp:
+            return None
+        with torch.no_grad():
+            return build_radius_graph(
+                positions, n_per, self._hybrid_radius, self._hybrid_max_neighbors
+            )
 
     def predict_positions(
         self,
@@ -305,7 +373,10 @@ class TransolverSimulator(CaseBoundSimulator):
         )
         node_feats = self._node_normalizer(node_feats_raw, accumulate=False)
 
-        out = self._net(node_feats, None)  # (P, k*(dim+1))
+        # Hybrid MP branch: build the radius graph from the current positions
+        # (single bound example, so n_per=None); None when hybrid_mp is off.
+        graph = self._build_graph(x_t, None)
+        out = self._net(node_feats, None, graph)  # (P, k*(dim+1))
         if self._k == 1:
             # Byte-identical k=1 path. Inverse-normalize the FULL (P, dim+1)
             # output first -- slicing before inverse would broadcast the
@@ -445,7 +516,12 @@ class TransolverSimulator(CaseBoundSimulator):
         )
         node_feats = self._node_normalizer(node_feats_raw, accumulate=accumulate)
 
-        pred_norm = self._net(node_feats, n_particles_per_example)  # (P, k*(dim+1))
+        # Hybrid MP branch: build the per-example radius graph from x_last (the
+        # positions this forward predicts from); None when hybrid_mp is off.
+        graph = self._build_graph(x_last, n_particles_per_example)
+        pred_norm = self._net(
+            node_feats, n_particles_per_example, graph
+        )  # (P, k*(dim+1))
 
         if self._k == 1:
             # Byte-identical k=1 path.

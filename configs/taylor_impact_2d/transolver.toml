@@ -31,6 +31,10 @@ max_grad_norm = 0.1             # global-norm clip, thuml reference
 
 velocity_history = false      # reference Markovian feature builder (ADR-0049 off)
 frames_per_call = 1            # ADR-0050/0051 prediction scheme: 1 = autoregressive next-step
+hybrid_mp = false            # Design A hybrid local MP branch: off = vanilla Transolver
+hybrid_radius = 0.0          # radius of the dynamic MP graph (inert while hybrid_mp=false)
+hybrid_max_neighbors = 32    # per-node incoming-edge cap of the MP graph
+hybrid_blocks = 1            # number of middle blocks carrying the MP branch
 
 [train]
 batch_size = 2                  # family reference (ADR-0044, matched to MGN)

@@ -1,0 +1,50 @@
+# Notch-impact — Transolver HYBRID (Design A) provisional arm. Off the notch
+# Transolver recipe (ADR-0048; family recipe ADR-0044), with velocity-history
+# ON (the "plain-VH" recipe: momentum-aware node features, no phi-conditioning)
+# so the local branch is the ONLY change relative to a plain-VH baseline. Adds
+# the Design A local message-passing branch (a middle-block MGN-style residual
+# on a dynamic k-capped radius graph, parallel to Physics-Attention) — the KPI
+# is the off-grid probe, where the pure operators lose ~2.4x on one-step
+# representation to MGN's translation-invariant local pathway (probe-diagnostic
+# ADR). hybrid_radius = 7.5 mm = the notch MGN/CGN connectivity radius.
+# Budget: 60k sanity-ladder step (blessed h250c recipe is 250k); input_frames =
+# 6 per the card; train_frames = 250 (ADR-0039 scored window). Not yet run.
+
+[run]
+benchmark = "notch_beam_2d_impact"
+seed = 1
+
+[model]
+family = "transolver"
+input_frames = 6                # notch card protocol (ADR-0035)
+dim = 2
+hidden_dim = 128                # ADR-0044 family reference
+n_layers = 8
+n_heads = 8
+slice_num = 64
+mlp_ratio = 1
+dropout = 0.0
+node_type_size = 4              # raw ids: 1 = beam, 2 = pin, 3 = supports (max id + 1)
+noise_std = 0.003               # DP family-reference value (declared deviation from h250c 0.01)
+normalizer_warmup_steps = 1000
+weight_decay = 1e-5             # AdamW, thuml reference (ADR-0044); MP branch excluded
+max_grad_norm = 0.1             # global-norm clip, thuml reference
+
+velocity_history = true         # plain-VH: +5 window velocities, CGN random-walk noise +
+                                # GNS adjusted-next target (ADR-0049); the only baseline delta
+frames_per_call = 1             # ADR-0050/0051 prediction scheme: autoregressive next-step
+hybrid_mp = true                # Design A local message-passing branch ON
+hybrid_radius = 7.5             # working frame (mm) = notch MGN/CGN connectivity radius
+hybrid_max_neighbors = 32       # per-node incoming-edge cap (~28 neighbours physical, under cap)
+hybrid_blocks = 1               # one middle block (block L//2 = 4); minimal intervention
+
+[train]
+batch_size = 2                  # family reference (ADR-0044, matched to MGN)
+lr_init = 1e-3                  # thuml reference start rate (ADR-0044)
+lr_decay = 0.1                  # UNUSED by the transolver family (cosine anneal, ADR-0044)
+training_steps = 60_000         # sanity-ladder budget (h250c blessing budget is 250k)
+val_every = 2000                # h250c cadence
+w_pos = 1.0
+w_aux = 1.0
+aux_tail_weight = 0.0
+train_frames = 250              # ADR-0039 §4 recipe: train only the scored window
