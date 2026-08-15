@@ -242,6 +242,70 @@ def test_hybrid_mp_changes_offgrid_prediction():
     )
 
 
+def test_hybrid_edge_frame_rejects_unknown_value():
+    # The frame enum is validated at construction (mirrors the config-load
+    # guard), so a typo fails loudly rather than silently defaulting.
+    with pytest.raises(ValueError, match="hybrid_edge_frame"):
+        _hybrid_sim(hybrid_edge_frame="bogus")
+
+
+def test_reference_frame_graph_is_static_under_position_perturbation():
+    # (iter3 KEY) With hybrid_edge_frame='reference' the MP graph is built from
+    # the fixed rest coordinates, so perturbing the CURRENT positions leaves the
+    # edge index AND the edge features byte-identical: the graph is truly static
+    # across the rollout, which is what kills the predicted-state drift feedback.
+    torch.manual_seed(0)
+    p = 30
+    ref = torch.rand(p, 2)
+    xa = torch.rand(p, 2)
+    xb = torch.rand(p, 2)  # a genuinely different current-position cloud
+    sim = _hybrid_sim(hybrid_edge_frame="reference")
+    ei_a, ef_a = sim._build_graph(xa, ref, None)
+    ei_b, ef_b = sim._build_graph(xb, ref, None)
+    assert ei_a.shape[1] > 0  # non-empty, so the equality is a real check
+    assert torch.equal(ei_a, ei_b)  # edge_index invariant to x_t
+    assert torch.equal(ef_a, ef_b)  # rest-frame relative-position feats too
+
+
+def test_current_frame_graph_changes_under_position_perturbation():
+    # (unchanged behaviour) With the default 'current' frame the graph tracks the
+    # current positions, so a different position cloud gives a different graph.
+    torch.manual_seed(0)
+    p = 30
+    ref = torch.rand(p, 2)
+    xa = torch.rand(p, 2)
+    xb = torch.rand(p, 2)
+    sim = _hybrid_sim()  # default hybrid_edge_frame='current'
+    ei_a, _ = sim._build_graph(xa, ref, None)
+    ei_b, _ = sim._build_graph(xb, ref, None)
+    assert not torch.equal(ei_a, ei_b)  # graph moved with x_t
+
+
+def test_reference_frame_mp_edge_mlp_receives_gradient():
+    # Reference-frame variant of the key grad-flow check: the static-graph MP
+    # branch must still receive nonzero gradient (else the gate is a dead no-op
+    # even with the rest-frame graph).
+    torch.manual_seed(0)
+    sim = _hybrid_sim(hybrid_edge_frame="reference")
+    p = 12
+    x = torch.rand(p, 2)
+    nxt = x + 0.05
+    aux = torch.rand(p)
+    types = torch.zeros(p, dtype=torch.int64)
+    ref = torch.rand(p, 2)
+    pred, target = sim.forward_train(
+        x, nxt, aux, types, ref, torch.tensor([p]), accumulate=False
+    )
+    loss = ((pred - target) ** 2).mean()
+    assert torch.isfinite(loss)
+    loss.backward()
+    block = _mp_block(sim)
+    edge_lin = block.mp.edge_mlp[0]
+    assert isinstance(edge_lin, torch.nn.Linear)
+    assert edge_lin.weight.grad is not None
+    assert float(edge_lin.weight.grad.norm()) > 0.0
+
+
 def test_hybrid_no_decay_parameters_lists_mp_branch():
     sim = _hybrid_sim()
     no_decay = sim.hybrid_no_decay_parameters()

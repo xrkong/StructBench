@@ -105,6 +105,7 @@ class TransolverSimulator(CaseBoundSimulator):
         hybrid_radius: float = 0.0,
         hybrid_max_neighbors: int = 32,
         hybrid_blocks: int = 1,
+        hybrid_edge_frame: str = "current",
         device: str | torch.device = "cpu",
     ) -> None:
         super().__init__(
@@ -145,9 +146,15 @@ class TransolverSimulator(CaseBoundSimulator):
                 f"hybrid_mp=True requires hybrid_radius > 0 (got {hybrid_radius}); "
                 "the local branch has no graph to run on otherwise"
             )
+        if hybrid_edge_frame not in ("current", "reference"):
+            raise ValueError(
+                "hybrid_edge_frame must be 'current' or 'reference'; got "
+                f"{hybrid_edge_frame!r}"
+            )
         self._hybrid_mp = hybrid_mp
         self._hybrid_radius = hybrid_radius
         self._hybrid_max_neighbors = hybrid_max_neighbors
+        self._hybrid_edge_frame = hybrid_edge_frame
 
         self._net = TransolverNet(
             node_in=node_in,
@@ -260,21 +267,31 @@ class TransolverSimulator(CaseBoundSimulator):
         return torch.cat(parts, dim=-1)
 
     def _build_graph(
-        self, positions: Tensor, n_per: Tensor | None
+        self, positions: Tensor, reference_coords: Tensor, n_per: Tensor | None
     ) -> tuple[Tensor, Tensor] | None:
         """Build the hybrid MP branch's radius graph, or ``None`` when disabled.
 
-        Built once per step from the current positions (``x_t`` on the eval
-        path, ``x_last`` on the train path) and reused across every hybrid
-        block. Constructed under ``no_grad`` — the edge index and relative-
-        position edge features are geometric constants of this step (positions
-        do not require gradient), exactly as MGN's world-edge features are.
+        Built once per step and reused across every hybrid block, under
+        ``no_grad`` — the edge index and relative-position edge features are
+        geometric constants of this step (coordinates do not require gradient),
+        exactly as MGN's world-edge features are.
+
+        The frame is set by ``hybrid_edge_frame``. ``"current"`` (default) uses
+        the current (predicted) positions (``x_t`` on the eval path, ``x_last``
+        on the train path), so the graph tracks the deforming geometry but
+        re-couples predicted-state drift each rollout step. ``"reference"`` uses
+        the fixed rest/reference coordinates, so the graph is STATIC across the
+        rollout: identical every step, no drift feedback, while still encoding
+        the local relative structure (in the rest frame).
         """
         if not self._hybrid_mp:
             return None
+        coords = (
+            reference_coords if self._hybrid_edge_frame == "reference" else positions
+        )
         with torch.no_grad():
             return build_radius_graph(
-                positions, n_per, self._hybrid_radius, self._hybrid_max_neighbors
+                coords, n_per, self._hybrid_radius, self._hybrid_max_neighbors
             )
 
     def predict_positions(
@@ -373,9 +390,11 @@ class TransolverSimulator(CaseBoundSimulator):
         )
         node_feats = self._node_normalizer(node_feats_raw, accumulate=False)
 
-        # Hybrid MP branch: build the radius graph from the current positions
-        # (single bound example, so n_per=None); None when hybrid_mp is off.
-        graph = self._build_graph(x_t, None)
+        # Hybrid MP branch: build the radius graph in the configured frame
+        # (current positions x_t, or the static bound reference_coords when
+        # hybrid_edge_frame='reference'); single bound example, so n_per=None;
+        # None when hybrid_mp is off.
+        graph = self._build_graph(x_t, reference_coords, None)
         out = self._net(node_feats, None, graph)  # (P, k*(dim+1))
         if self._k == 1:
             # Byte-identical k=1 path. Inverse-normalize the FULL (P, dim+1)
@@ -516,9 +535,11 @@ class TransolverSimulator(CaseBoundSimulator):
         )
         node_feats = self._node_normalizer(node_feats_raw, accumulate=accumulate)
 
-        # Hybrid MP branch: build the per-example radius graph from x_last (the
-        # positions this forward predicts from); None when hybrid_mp is off.
-        graph = self._build_graph(x_last, n_particles_per_example)
+        # Hybrid MP branch: build the per-example radius graph in the configured
+        # frame — x_last (the positions this forward predicts from), or the
+        # static reference_coords when hybrid_edge_frame='reference'; None when
+        # hybrid_mp is off.
+        graph = self._build_graph(x_last, reference_coords, n_particles_per_example)
         pred_norm = self._net(
             node_feats, n_particles_per_example, graph
         )  # (P, k*(dim+1))

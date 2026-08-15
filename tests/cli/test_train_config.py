@@ -259,6 +259,7 @@ hybrid_mp = false
 hybrid_radius = 0.0
 hybrid_max_neighbors = 32
 hybrid_blocks = 1
+hybrid_edge_frame = "current"
 
 [train]
 batch_size = 8
@@ -385,8 +386,36 @@ def test_load_notch_hybrid_config():
     assert rc.model.hybrid_mp is True
     assert rc.model.hybrid_radius == 7.5
     assert rc.model.velocity_history is True
+    assert rc.model.hybrid_edge_frame == "current"  # existing arm = current frame
     assert rc.train.training_steps == 60_000
     assert rc.train.train_frames == 250
+
+
+def test_load_run_config_rejects_bad_hybrid_edge_frame(tmp_path):
+    # The frame is an enum: an unrecognised value is a load error, not a silent
+    # fallback to 'current'.
+    bad = VALID_TRANSOLVER.replace(
+        'hybrid_edge_frame = "current"', 'hybrid_edge_frame = "world"'
+    )
+    with pytest.raises(ConfigError, match="hybrid_edge_frame must be"):
+        load_run_config(_write(tmp_path, bad))
+
+
+def test_load_hybrid_reference_frame_configs():
+    # The iter3 reference-frame arms: hybrid_edge_frame='reference' (static
+    # rest-frame graph), otherwise identical to the current-frame hybrid arms.
+    for bench, radius in (("taylor_impact_2d", 1.5), ("notch_beam_2d_impact", 7.5)):
+        for seed in (1, 2):
+            rc = load_run_config(
+                REPO_ROOT / "configs" / bench / f"transolver-hybrid-ref-s{seed}.toml"
+            )
+            assert rc.family == "transolver"
+            assert rc.model.hybrid_mp is True
+            assert rc.model.hybrid_edge_frame == "reference"
+            assert rc.model.hybrid_radius == radius
+            assert rc.model.velocity_history is True
+            assert rc.train.seed == seed
+            assert rc.train.training_steps == 60_000
 
 
 #: A complete, valid GeoFLARE grouped config (deforming_plate card input_frames=2).

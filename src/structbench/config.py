@@ -258,6 +258,15 @@ class TransolverConfig:
         Number of MIDDLE blocks that carry the MP branch (never block 0 or the
         decoder block). Default ``1`` (the minimal intervention: one middle
         block). Only used when ``hybrid_mp``.
+    hybrid_edge_frame : str
+        Frame the MP radius graph is built in: ``"current"`` (default) rebuilds
+        it each step from the current (predicted) positions — the iter2
+        behaviour, byte-identical when unset — or ``"reference"`` builds it ONCE
+        from the rest/reference coordinates, so the graph is STATIC across the
+        rollout. ``"reference"`` removes the predicted-state drift feedback that
+        a current-frame graph re-couples each step (the iter2 rollout-drift
+        finding) while keeping the local relative-structure representation.
+        Only meaningful when ``hybrid_mp``.
     """
 
     input_frames: int = 2
@@ -279,6 +288,7 @@ class TransolverConfig:
     hybrid_radius: float = 0.0
     hybrid_max_neighbors: int = 32
     hybrid_blocks: int = 1
+    hybrid_edge_frame: str = "current"
 
 
 @dataclass
@@ -697,6 +707,17 @@ def load_run_config(path: str | Path) -> ResolvedRunConfig:
             "[model] hybrid_mp=true requires hybrid_radius > 0 (the local "
             f"message-passing branch has no graph otherwise); got "
             f"hybrid_radius={getattr(model, 'hybrid_radius', 0.0)}"
+        )
+
+    # Design A hybrid MP graph frame (only meaningful when hybrid_mp): the
+    # radius graph is built in the current (predicted) frame or the static
+    # rest/reference frame. Reject a typo'd value at load, not deep in the
+    # simulator.
+    edge_frame = getattr(model, "hybrid_edge_frame", "current")
+    if edge_frame not in ("current", "reference"):
+        raise ConfigError(
+            "[model] hybrid_edge_frame must be 'current' or 'reference' (the "
+            f"frame the MP radius graph is built in); got {edge_frame!r}"
         )
 
     return ResolvedRunConfig(

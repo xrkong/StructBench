@@ -12,7 +12,7 @@
 
 [run]
 benchmark = "notch_beam_2d_impact"
-seed = 1
+seed = 2
 
 [model]
 family = "transolver"

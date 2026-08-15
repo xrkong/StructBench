@@ -1,13 +1,12 @@
-# Taylor 2D — Transolver HYBRID (Design A) arm, seed 2. Off the ADR-0049
-# N02+VH recipe (transolver-n02-vh): noise 0.02, velocity-history features,
-# CGN random-walk window noise + GNS adjusted-next target. Adds the Design A
-# local message-passing branch (a middle-block MGN-style residual on a dynamic
-# k-capped radius graph, parallel to Physics-Attention) to test whether a
-# state-carrying local pathway helps WITHOUT regressing Taylor's interpolation
-# win. hybrid_radius = 1.5 mm = the Taylor MGN/CGN connectivity radius; the
-# operator backbone is untouched (global attention unchanged), and the MP gate
-# is a small-nonzero LayerScale so training discovers the split.
-# Budget: 60k (sanity ladder step, not the 100k blessing budget). Not yet run.
+# Taylor 2D — Transolver HYBRID (Design A) REFERENCE-FRAME arm, seed 2.
+# Identical to transolver-hybrid-s2 except hybrid_edge_frame = "reference": the
+# local MP radius graph is built ONCE from the rest/reference coordinates and is
+# STATIC across the rollout, instead of being rebuilt each step from the current
+# (predicted) positions — removing the predicted-state drift feedback that a
+# current-frame graph re-couples each step, while keeping the local relative-
+# structure representation. hybrid_radius = 1.5 mm = the Taylor MGN/CGN
+# connectivity radius. Budget: 60k (sanity ladder step, not the 100k blessing
+# budget). Not yet run.
 
 [run]
 benchmark = "taylor_impact_2d"
@@ -37,7 +36,7 @@ hybrid_radius = 1.5             # working frame (mm) = Taylor MGN/CGN connectivi
 hybrid_max_neighbors = 32       # per-node incoming-edge cap (bounds E; Taylor degree ~53
                                 # in the mushroom, so this truncates by design)
 hybrid_blocks = 1               # one middle block (block L//2 = 4); minimal intervention
-hybrid_edge_frame = "current"  # MP graph frame: current (predicted) positions | reference (static rest)
+hybrid_edge_frame = "reference" # STATIC rest-frame graph (no drift feedback); iter3 fix
 
 [train]
 batch_size = 2                  # family reference (ADR-0044, matched to MGN)

@@ -421,6 +421,7 @@ def build_transolver_simulator(
         hybrid_radius=cfg.hybrid_radius,
         hybrid_max_neighbors=cfg.hybrid_max_neighbors,
         hybrid_blocks=cfg.hybrid_blocks,
+        hybrid_edge_frame=cfg.hybrid_edge_frame,
         kinematic_types=kinematic_types,
         **({} if scripted_types is None else {"scripted_types": scripted_types}),
         device=device,

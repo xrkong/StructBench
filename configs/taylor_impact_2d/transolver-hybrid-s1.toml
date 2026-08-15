@@ -37,6 +37,7 @@ hybrid_radius = 1.5             # working frame (mm) = Taylor MGN/CGN connectivi
 hybrid_max_neighbors = 32       # per-node incoming-edge cap (bounds E; Taylor degree ~53
                                 # in the mushroom, so this truncates by design)
 hybrid_blocks = 1               # one middle block (block L//2 = 4); minimal intervention
+hybrid_edge_frame = "current"  # MP graph frame: current (predicted) positions | reference (static rest)
 
 [train]
 batch_size = 2                  # family reference (ADR-0044, matched to MGN)

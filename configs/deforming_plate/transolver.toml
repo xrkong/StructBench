@@ -30,6 +30,7 @@ hybrid_mp = false            # Design A hybrid local MP branch: off = vanilla Tr
 hybrid_radius = 0.0          # radius of the dynamic MP graph (inert while hybrid_mp=false)
 hybrid_max_neighbors = 32    # per-node incoming-edge cap of the MP graph
 hybrid_blocks = 1            # number of middle blocks carrying the MP branch
+hybrid_edge_frame = "current"  # MP graph frame: current (predicted) positions | reference (static rest)
 
 [train]
 batch_size = 2

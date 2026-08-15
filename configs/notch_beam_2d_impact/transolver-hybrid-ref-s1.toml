@@ -1,14 +1,15 @@
-# Notch-impact — Transolver HYBRID (Design A) provisional arm. Off the notch
-# Transolver recipe (ADR-0048; family recipe ADR-0044), with velocity-history
-# ON (the "plain-VH" recipe: momentum-aware node features, no phi-conditioning)
-# so the local branch is the ONLY change relative to a plain-VH baseline. Adds
-# the Design A local message-passing branch (a middle-block MGN-style residual
-# on a dynamic k-capped radius graph, parallel to Physics-Attention) — the KPI
-# is the off-grid probe, where the pure operators lose ~2.4x on one-step
-# representation to MGN's translation-invariant local pathway (probe-diagnostic
-# ADR). hybrid_radius = 7.5 mm = the notch MGN/CGN connectivity radius.
-# Budget: 60k sanity-ladder step (blessed h250c recipe is 250k); input_frames =
-# 6 per the card; train_frames = 250 (ADR-0039 scored window). Not yet run.
+# Notch-impact — Transolver HYBRID (Design A) REFERENCE-FRAME arm, seed 1.
+# Identical to transolver-hybrid-s1 except hybrid_edge_frame = "reference": the
+# local MP radius graph is built ONCE from the rest/reference coordinates and is
+# STATIC across the rollout, instead of being rebuilt each step from the current
+# (predicted) positions. iter2 (current-frame) FIXED the off-grid one-step
+# (probe one-step 0.0014 < MGN 0.00214) but the drift feedback through the
+# per-step-rebuilt graph ~tripled the rollout accumulation (probe ratio ~370x vs
+# ~130x baseline, rollout 0.52). The static rest-frame graph removes the
+# drift-feedback while keeping the local relative-structure representation.
+# hybrid_radius = 7.5 mm = the notch MGN/CGN connectivity radius. Budget: 60k
+# sanity-ladder step; input_frames = 6 per the card; train_frames = 250
+# (ADR-0039 scored window). Not yet run.
 
 [run]
 benchmark = "notch_beam_2d_impact"
@@ -37,7 +38,7 @@ hybrid_mp = true                # Design A local message-passing branch ON
 hybrid_radius = 7.5             # working frame (mm) = notch MGN/CGN connectivity radius
 hybrid_max_neighbors = 32       # per-node incoming-edge cap (~28 neighbours physical, under cap)
 hybrid_blocks = 1               # one middle block (block L//2 = 4); minimal intervention
-hybrid_edge_frame = "current"  # MP graph frame: current (predicted) positions | reference (static rest)
+hybrid_edge_frame = "reference" # STATIC rest-frame graph (no drift feedback); iter3 fix
 
 [train]
 batch_size = 2                  # family reference (ADR-0044, matched to MGN)
