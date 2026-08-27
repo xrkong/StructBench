@@ -30,6 +30,7 @@ _MODULES: dict[str, str] = {
     "notch_beam_2d_impact": "structbench.benchmarks.notch_beam_2d_impact",
     "taylor_impact_2d": "structbench.benchmarks.taylor_impact_2d",
     "wave_propagation_1d": "structbench.benchmarks.wave_propagation_1d",
+    "vehicle_barrier_crash_3d": "structbench.benchmarks.vehicle_barrier_crash_3d",
 }
 
 
