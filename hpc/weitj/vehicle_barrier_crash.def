@@ -1,0 +1,93 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+%labels
+    Application structbench-vehicle-barrier-crash
+    Author xiangrui.kong.uwa@gmail.com
+
+%help
+    Apptainer image for running StructBench's structbench-train CLI on the
+    vehicle_barrier_crash benchmark. Ships Python 3.12 (StructBench's floor),
+    StructBench's declared runtime dependencies (numpy/h5py/lasso-python/
+    torch-geometric; NOT the structbench package itself — the actual source
+    tree is bind-mounted from the host at run time via PYTHONPATH=src, same
+    as hpc/dug/setup_env.sh's .venv convention, so the image never goes stale
+    against a new commit), and PyTorch 2.11.0 built for CUDA 12.8 (required
+    for Blackwell/B200 GPUs, sm_100 — cu118 wheels do not include sm_100
+    kernels). Adapted from ~/collider's collider.def (2026-09-02): that image
+    installed collider's OWN train.py/model stack (accelerate/wandb/pyvista/
+    einops/timm via requirements.txt); this one deliberately does not, since
+    training goes through StructBench's own trainer and its existing
+    models/transolver/ submodule instead (see decisions/0058-*.md).
+
+    Build (from the repo root, needs internet on the login node):
+        apptainer build hpc/weitj/vehicle_barrier_crash.sif hpc/weitj/vehicle_barrier_crash.def
+
+    Run (GPU node, must pass --nv to expose the host driver; run from the
+    repo root so the bind-mounted CWD contains src/):
+        export PYTHONPATH=src
+        apptainer exec --nv hpc/weitj/vehicle_barrier_crash.sif \
+            python -m structbench.cli.train --mode train \
+            --config configs/vehicle_barrier_crash/transolver.toml \
+            --data-root "$DATA" --out "$OUT"
+
+    Shell:
+        apptainer shell --nv hpc/weitj/vehicle_barrier_crash.sif
+
+%post
+    if [ -z "${BASH_VERSION:-}" ]; then
+        exec /bin/bash "$0" "$@"
+    fi
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        wget ca-certificates git build-essential
+    rm -rf /var/lib/apt/lists/*
+
+    # --- Miniforge (conda) ---
+    MINIFORGE_INSTALLER=Miniforge3-$(uname)-$(uname -m).sh
+    wget -q "https://github.com/conda-forge/miniforge/releases/latest/download/${MINIFORGE_INSTALLER}" -O /tmp/miniforge.sh
+    bash /tmp/miniforge.sh -b -p /opt/conda
+    rm /tmp/miniforge.sh
+
+    export PATH=/opt/conda/bin:${PATH}
+    source /opt/conda/etc/profile.d/conda.sh
+
+    # --- structbench environment ---
+    # Python 3.12 floor (StructBench pyproject.toml requires-python), not
+    # collider's 3.11.
+    conda create -y -n structbench python=3.12
+    conda activate structbench
+
+    # StructBench's declared runtime deps (pyproject.toml `dependencies`),
+    # pinned to the same lower bounds — NOT collider's requirements.txt, and
+    # NOT `pip install structbench` itself (the source tree is bind-mounted
+    # at run time, so the image stays valid across commits without rebuilds).
+    pip install --no-cache-dir \
+        "numpy>=1.26" "h5py>=3.10" "lasso-python>=2.0" "torch-geometric>=2.3"
+
+    # cu128 wheels bundle their own CUDA runtime (cublas/cudnn/nccl/...),
+    # so no system CUDA toolkit is needed in the base image. The host's
+    # driver is exposed at runtime via `apptainer ... --nv`.
+    # cu128+ is required for Blackwell/B200 GPUs (sm_100); cu118 lacks
+    # those kernels and silently reports cuda.is_available() == False.
+    pip install --no-cache-dir \
+        torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 \
+        --index-url https://download.pytorch.org/whl/cu128
+
+    conda clean -afy
+    pip cache purge
+
+%environment
+    export PATH=/opt/conda/envs/structbench/bin:/opt/conda/bin:${PATH}
+    export CONDA_DEFAULT_ENV=structbench
+
+%runscript
+    exec "$@"
+
+%test
+    export PATH=/opt/conda/envs/structbench/bin:${PATH}
+    python -c "import torch; print('torch', torch.__version__, 'cuda available:', torch.cuda.is_available())"
+    python -c "import torch_geometric, h5py, numpy; print('torch_geometric', torch_geometric.__version__)"
