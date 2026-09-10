@@ -14,7 +14,7 @@ without it; plotting calls raise with that instruction.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -369,6 +369,69 @@ def compare_rollout(
     return fig
 
 
+def _render_gif(
+    fig: Figure,
+    update: Callable[[int], None],
+    n_frames: int,
+    out_path: str | Path,
+    *,
+    fps: int,
+    dpi: int,
+) -> Path:
+    """Render ``n_frames`` (via in-place ``update(frame)`` on ``fig``) to a GIF.
+
+    Deliberately NOT ``matplotlib.animation.FuncAnimation`` +
+    ``PillowWriter``: that combination mis-renders a ``constrained_layout``
+    figure carrying a colorbar (frames come out sheared, with garbled/
+    duplicated tick labels — observed 2026-09-10 building a two-panel
+    ground-truth-vs-prediction comparison GIF). Rendering each frame with a
+    plain ``fig.savefig`` and assembling the GIF with Pillow directly sidesteps
+    the animation writer entirely and has no such issue.
+
+    Parameters
+    ----------
+    fig:
+        The already-built figure; ``update`` mutates its artists in place
+        (mirrors the ``FuncAnimation`` callback contract).
+    update:
+        Called once per frame index to update the figure's artists (e.g.
+        ``PathCollection.set_offsets``/``set_array``, text updates).
+    n_frames:
+        Number of frames to render.
+    out_path:
+        Output ``.gif`` path.
+    fps, dpi:
+        Frame rate and raster resolution.
+
+    Returns
+    -------
+    pathlib.Path
+        ``out_path``, as a :class:`~pathlib.Path`.
+    """
+    import io
+
+    from PIL import Image
+
+    frames: list[Image.Image] = []
+    for frame in range(n_frames):
+        update(frame)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=dpi)
+        buf.seek(0)
+        frames.append(Image.open(buf).convert("RGB"))
+        buf.close()
+
+    out = Path(out_path)
+    frames[0].save(
+        out,
+        save_all=True,
+        append_images=frames[1:],
+        duration=round(1000 / fps),
+        loop=0,
+    )
+    return out
+
+
 def animate_rollout(
     positions: NDArray[np.floating],
     values: NDArray[np.floating],
@@ -393,7 +456,7 @@ def animate_rollout(
         Trajectory ``(T, P, dim)`` in mm (3D drawn as the x-y projection)
         and field ``(T, P)``.
     out_path:
-        Output file; the extension picks the writer (``.gif`` uses pillow).
+        Output file, written as a GIF via Pillow (see :func:`_render_gif`).
     times_us, title, field, vmin, vmax, bands, wall_x, size:
         As in :func:`compare_rollout`; the fringe range defaults to the
         global min/max over all frames so the bar stays fixed.
@@ -406,7 +469,6 @@ def animate_rollout(
         The written file.
     """
     plt = _plt()
-    from matplotlib.animation import FuncAnimation, PillowWriter
 
     spec = _resolve(field)
     vmin, vmax = _limits(np.asarray(values), vmin, vmax)
@@ -440,15 +502,12 @@ def animate_rollout(
 
     text = fig.suptitle(_stamp(0), fontsize=10)
 
-    def _update(frame: int) -> tuple[Any, ...]:
+    def _update(frame: int) -> None:
         sc.set_offsets(positions[frame][:, :2])
         sc.set_array(np.clip(values[frame], vmin, vmax))
         text.set_text(_stamp(frame))
-        return (sc, text)
 
-    anim = FuncAnimation(fig, _update, frames=positions.shape[0], blit=False)
-    out = Path(out_path)
-    anim.save(out, writer=PillowWriter(fps=fps), dpi=dpi)
+    out = _render_gif(fig, _update, positions.shape[0], out_path, fps=fps, dpi=dpi)
     plt.close(fig)
     return out
 
@@ -484,7 +543,7 @@ def animate_comparison(
         Ground-truth and predicted trajectories ``(T, P, dim)`` in mm and
         fields ``(T, P)``. Animated over ``min`` of the two frame counts.
     out_path:
-        Output file; ``.gif`` uses the pillow writer.
+        Output file, written as a GIF via Pillow (see :func:`_render_gif`).
     field, vmin, vmax, bands, wall_x, size:
         As in :func:`compare_rollout` / :func:`fringe_scatter`.
     times_us:
@@ -500,7 +559,6 @@ def animate_comparison(
         The written file.
     """
     plt = _plt()
-    from matplotlib.animation import FuncAnimation, PillowWriter
 
     spec = _resolve(field)
     vmin, vmax = _limits(np.asarray(gt_values), vmin, vmax)
@@ -546,17 +604,14 @@ def animate_comparison(
     text = fig.suptitle(_stamp(0), fontsize=11)
     trajectories = ((gt_positions, gt_values), (pred_positions, pred_values))
 
-    def _update(frame: int) -> tuple[Any, ...]:
+    def _update(frame: int) -> None:
         for sc, (positions, values) in zip(scatters, trajectories, strict=True):
             sc.set_offsets(positions[frame][:, :2])
             sc.set_array(np.clip(values[frame], vmin, vmax))
         text.set_text(_stamp(frame))
-        return (*scatters, text)
 
     n_frames = min(gt_positions.shape[0], pred_positions.shape[0])
-    anim = FuncAnimation(fig, _update, frames=n_frames, blit=False)
-    out = Path(out_path)
-    anim.save(out, writer=PillowWriter(fps=fps), dpi=dpi)
+    out = _render_gif(fig, _update, n_frames, out_path, fps=fps, dpi=dpi)
     plt.close(fig)
     return out
 

@@ -21,7 +21,6 @@
 #SBATCH --job-name=probe
 #SBATCH --partition=LocalQ
 #SBATCH --gres=gpu:1
-#SBATCH --mem=64G
 #SBATCH --time=00:15:00
 #SBATCH --output=scratch/logs/slurm-vbc3d-probe-%j.out
 

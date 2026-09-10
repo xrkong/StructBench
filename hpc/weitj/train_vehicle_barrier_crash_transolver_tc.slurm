@@ -23,7 +23,6 @@
 #SBATCH --job-name=vbc3d-transolver-tc
 #SBATCH --partition=LocalQ
 #SBATCH --gres=gpu:1
-#SBATCH --mem=128G
 #SBATCH --time=168:00:00
 #SBATCH --output=scratch/logs/slurm-vbc3d-transolver-tc-%j.out
 
