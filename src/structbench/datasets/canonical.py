@@ -201,12 +201,59 @@ def _aux_max_principal_strain(
     return max_principal_strain_from_voigt(sph["strain"][...]).astype(np.float32)
 
 
+def _aux_effective_plastic_strain(
+    sph: Mapping[str, NDArray[np.floating]], stress_scale: float
+) -> NDArray[np.float32]:
+    """Effective (equivalent) plastic strain, read verbatim from the d3plot slot.
+
+    Unlike :func:`_aux_damage` (ADR-0026's K&C scaled-damage reuse of this
+    same d3plot slot for ``*MAT_CONCRETE_DAMAGE_REL3``), this extractor treats
+    the value as the literal effective plastic strain LS-DYNA writes for every
+    other material model. Dimensionless, so ``stress_scale`` is ignored.
+    Registered mainly so the mesh path accepts the name (ADR-0058): a mesh
+    benchmark reads ``aux_field`` directly as a ``response.node`` key and
+    never calls this function (see :func:`available_aux_fields`'s docstring);
+    this extractor exists so a future SPH benchmark could reuse the same name
+    verbatim.
+
+    Parameters
+    ----------
+    sph:
+        Mapping of SPH response fields with an
+        ``"effective_plastic_strain"`` key holding a ``(T, P)`` array.
+    stress_scale:
+        Unused; present for the :data:`AuxExtractor` signature.
+
+    Returns
+    -------
+    numpy.ndarray
+        Shape ``(T, P)``, float32, dimensionless.
+    """
+    del stress_scale
+    return sph["effective_plastic_strain"][...].astype(np.float32)
+
+
 _AUX_EXTRACTORS: dict[str, AuxExtractor] = {
     "von_mises_stress": _aux_von_mises,
     "axial_stress": _aux_axial_stress,
     "damage": _aux_damage,
     "max_principal_strain": _aux_max_principal_strain,
+    "effective_plastic_strain": _aux_effective_plastic_strain,
 }
+
+#: aux field names whose value is dimensionless, kept in sync with which
+#: ``_aux_*`` extractor above ``del stress_scale`` instead of applying it
+#: (ADR-0058). The SPH path already gets this right per-extractor; the mesh
+#: path (:func:`_load_mesh_trajectory`) has no per-field extractor to ask, so
+#: it consults this set directly before applying ``stress_scale`` — without
+#: it, a dimensionless mesh aux field (e.g. effective_plastic_strain) would
+#: get silently scaled by the Pa->MPa factor (1e-6), the same unit/scaling
+#: bug class as the CORRECTIONS.md 2026-08-17 noise_std incident. Every
+#: stress-like field (von_mises_stress, axial_stress) is absent here on
+#: purpose — it must be scaled.
+_DIMENSIONLESS_AUX_FIELDS: frozenset[str] = frozenset(
+    {"damage", "max_principal_strain", "effective_plastic_strain"}
+)
 
 
 def available_aux_fields() -> frozenset[str]:
@@ -262,8 +309,9 @@ def load_case_trajectory(
         SPH path: name of the auxiliary extraction strategy to apply, must be
         one of :func:`available_aux_fields`, and receives ``stress_scale`` to
         convert stress-like values from SI to the working unit. Mesh path: a
-        ``response.node`` key read directly (``stress_scale`` still applies).
-        Defaults to ``"von_mises_stress"``.
+        ``response.node`` key read directly; ``stress_scale`` applies unless
+        ``aux_field`` is in the dimensionless set (ADR-0058, e.g.
+        ``effective_plastic_strain``). Defaults to ``"von_mises_stress"``.
     length_scale:
         Multiplier applied to SI positions (default 1e3: m -> mm).
     stress_scale:
@@ -353,7 +401,11 @@ def _load_mesh_trajectory(
     n = n_valid_frames(np.asarray(response.time))  # same trim as the SPH path
     disp = response.node["displacement"][:n].astype(np.float64)
     positions = ((nodes.coords[None, :, :] + disp) * length_scale).astype(np.float32)
-    aux = (response.node[aux_field][:n, :, 0].astype(np.float64) * stress_scale).astype(
+    # ADR-0058: stress_scale (Pa -> MPa) applies only to stress-like aux
+    # fields; a dimensionless one (e.g. effective_plastic_strain) must pass
+    # through unscaled -- see _DIMENSIONLESS_AUX_FIELDS's docstring.
+    aux_factor = 1.0 if aux_field in _DIMENSIONLESS_AUX_FIELDS else stress_scale
+    aux = (response.node[aux_field][:n, :, 0].astype(np.float64) * aux_factor).astype(
         np.float32
     )
     (block,) = case.elements.values()

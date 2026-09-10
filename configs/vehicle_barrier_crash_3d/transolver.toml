@@ -1,0 +1,72 @@
+# vehicle_barrier_crash_3d — Transolver TIME-CONDITIONED draft (ADR-0054/0058).
+#
+# DRAFT / PLACEHOLDER — this benchmark's data is not ingested yet
+# (benchmarks/vehicle_barrier_crash_3d/ has empty TRAIN/VAL/TEST splits), so
+# this config CANNOT be run yet: `train()` will fail on an empty dataset the
+# moment real cases exist under configs/vehicle_barrier_crash_3d/... this
+# file is a starting point to edit once real data lands, mirroring
+# configs/deforming_plate/transolver-timecond-s1.toml's TC recipe (the
+# closest precedent: history-free, non-autoregressive, prescribed-boundary
+# conditioning).
+#
+# Values marked TBD below are placeholders, not decisions -- see
+# scratch/2026-09-09-vbc3d-model-spec.md and -train-spec.md for what each one
+# depends on and why it can't be pinned yet.
+
+[run]
+benchmark = "vehicle_barrier_crash_3d"
+seed = 1
+
+[model]
+family = "transolver"
+input_frames = 2                 # TBD: ADR-0032 §5 requires a real ground-truth
+                                  # timeline analysis before this is pinned; must
+                                  # equal benchmarks/vehicle_barrier_crash_3d's
+                                  # card.input_frames (kept in sync manually)
+dim = 3
+hidden_dim = 128                 # Transolver paper reference config (unchanged
+n_layers = 8                     # across every StructBench Transolver run so far)
+n_heads = 8
+slice_num = 64
+mlp_ratio = 1
+dropout = 0.0
+node_type_size = 2                # real (2026-09-09): vehicle(0)/barrier(1),
+                                  # see core.io.vehicle_barrier_crash.NODE_TYPE_SIZE
+                                  # -- no kinematic type exists in this data
+noise_std = 0.0                  # inert under time-conditioning (no rollout)
+normalizer_warmup_steps = 1000
+weight_decay = 1e-5              # AdamW, thuml reference
+max_grad_norm = 0.1              # global-norm clip, thuml reference
+
+history_frames = 0               # REQUIRED 0 for time-conditioning (ADR-0054/0053)
+frames_per_call = 1              # REQUIRED 1 for time-conditioning (ADR-0054)
+impact_velocity_feature = false  # speed is fixed across this case set (confirmed
+                                  # earlier in session) -- do not turn on alongside
+                                  # loading_features (mutually exclusive)
+loading_features = 0             # TBD (likely 4): barrier layer-thickness vector,
+                                  # 0 = no layer at that position (ADR-0058) --
+                                  # 0 here means OFF; set to the real count once
+                                  # SPEC.loading_scalars is implemented
+time_conditioned = true          # ADR-0054: faithful thuml native structural scheme
+adaptive_temperature = false     # ADR-0057 (off = byte-identical)
+slice_reparam = false            # ADR-0057 (off = byte-identical)
+
+[train]
+batch_size = 2                   # TBD: revisit after a memory smoke test -- the
+                                  # real vehicle mesh is likely 1-2 orders of
+                                  # magnitude larger than DeformingPlate's 2189
+                                  # particles/case (collider's own downsampling
+                                  # target was ~100k nodes), so this may need to
+                                  # drop to 1 or use gradient accumulation
+lr_init = 1e-3
+lr_decay = 0.1                   # UNUSED by the transolver family (cosine anneal,
+                                  # ADR-0044); present because [train] is family-uniform
+training_steps = 250_000         # TBD placeholder, matching DP's TC budget --
+                                  # measure real throughput first (memory/step
+                                  # time will differ a lot at this scale)
+val_every = 5_000
+w_pos = 1.0
+w_aux = 1.0
+aux_tail_weight = 0.0
+train_frames = 0                 # TBD: pending the ground-truth timeline analysis
+                                  # (same one that pins input_frames above)

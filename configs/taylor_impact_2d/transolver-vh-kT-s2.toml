@@ -30,6 +30,7 @@ history_frames = 5            # +5 window velocities; CGN random-walk window noi
                               # accumulated position offset; ADR-0049)
 frames_per_call = 0            # ADR-0050/0051 k-frames axis (one-shot sentinel)
 impact_velocity_feature = false  # ADR-0051 B: scalar loading-param channel (off = byte-identical)
+loading_features = 0  # ADR-0058: N-scalar loading-param channels (off = byte-identical)
 time_conditioned = false        # ADR-0054: faithful thuml time-conditioned scheme (off = byte-identical)
 
 [train]

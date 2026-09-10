@@ -157,6 +157,14 @@ class CaseBoundSimulator(nn.Module):
         # (ADR-0051 B); None when the benchmark has no such scalar or the
         # feature is off.
         self._loading_scalar: float | None = None
+        # Per-case vector of scalar loading parameters (e.g. barrier layer
+        # thicknesses), the ADR-0058 generalization of _loading_scalar from
+        # one scalar to a fixed-size tuple; None when the benchmark has no
+        # such vector or the feature is off. Mutually exclusive with
+        # _loading_scalar in practice (a run sets at most one), but both
+        # attributes always exist so a subclass need not special-case which
+        # is active.
+        self._loading_scalars: tuple[float, ...] | None = None
 
         self.to(device)
 
@@ -167,6 +175,7 @@ class CaseBoundSimulator(nn.Module):
         particle_types: Tensor,
         kinematic_positions: Tensor,
         loading_scalar: float | None = None,
+        loading_scalars: tuple[float, ...] | None = None,
     ) -> None:
         """Bind one case's static geometry and GT trajectory; reset pointer.
 
@@ -190,6 +199,10 @@ class CaseBoundSimulator(nn.Module):
             The case's scalar loading parameter (impact velocity), cached for
             a subclass that uses the ``impact_velocity_feature`` global node
             channel (ADR-0051 B). ``None`` when the feature is off.
+        loading_scalars:
+            The case's vector of scalar loading parameters, cached for a
+            subclass that uses the ``loading_features`` global node channels
+            (ADR-0058). ``None`` when the feature is off.
         """
         self._reference_coords = reference_coords
         self._node_type_onehot = F.one_hot(
@@ -207,6 +220,7 @@ class CaseBoundSimulator(nn.Module):
         self._n_gt_frames = kinematic_positions.shape[0]
         self._t = None
         self._loading_scalar = loading_scalar
+        self._loading_scalars = loading_scalars
 
         self._on_bind_case(cells)
 

@@ -75,6 +75,7 @@ def collate_mesh_samples(
     batch: list[dict],
     statics: Sequence[MeshStatic],
     loading_scalars: Sequence[float] | None = None,
+    loading_scalar_vectors: Sequence[Sequence[float]] | None = None,
     include_target_frame: bool = False,
 ) -> dict:
     """Collate a batch of windowed samples into one mesh-batched graph.
@@ -93,6 +94,13 @@ def collate_mesh_samples(
         Per-trajectory static mesh data, indexed by each sample's
         ``"traj_idx"`` (i.e. ``statics[sample["traj_idx"]]``) — NOT by the
         sample's position in ``batch``.
+    loading_scalar_vectors:
+        ADR-0058: per-trajectory fixed-length vector of scalar loading
+        parameters (e.g. barrier layer thicknesses), the generalization of
+        ``loading_scalars`` from one scalar to a fixed-size tuple per
+        trajectory. Mutually exclusive with ``loading_scalars`` (a caller
+        passes at most one); writes the same ``"loading_feature"`` output key,
+        just ``N`` columns wide instead of 1.
 
     Returns
     -------
@@ -136,6 +144,11 @@ def collate_mesh_samples(
     out["mesh_edge_index"] = torch.cat(edge_parts, dim=1)
     out["reference_coords"] = torch.cat(coord_parts, dim=0)
 
+    if loading_scalars is not None and loading_scalar_vectors is not None:
+        raise ValueError(
+            "loading_scalars and loading_scalar_vectors are mutually "
+            "exclusive; pass at most one"
+        )
     if loading_scalars is not None:
         # ADR-0051 B: broadcast each sample's scalar loading parameter (by
         # traj_idx) to its particle rows, giving a (sum_P, 1) global feature.
@@ -146,6 +159,20 @@ def collate_mesh_samples(
                     float(loading_scalars[sample["traj_idx"]]),
                     dtype=torch.float32,
                 )
+                for sample in batch
+            ],
+            dim=0,
+        )
+    elif loading_scalar_vectors is not None:
+        # ADR-0058: same broadcast, but N columns wide per traj_idx instead
+        # of a single value.
+        out["loading_feature"] = torch.cat(
+            [
+                torch.tensor(
+                    loading_scalar_vectors[sample["traj_idx"]], dtype=torch.float32
+                )
+                .unsqueeze(0)
+                .expand(sample["n_particles"], -1)
                 for sample in batch
             ],
             dim=0,

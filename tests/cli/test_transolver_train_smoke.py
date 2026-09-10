@@ -13,6 +13,7 @@ import logging
 import math
 
 import numpy as np
+import pytest
 import torch
 
 from structbench.benchmarks.card import BenchmarkCard
@@ -67,6 +68,15 @@ def _mini_spec(case_ids: dict[str, list[str]]) -> BenchmarkSpec:
         # ADR-0051 B: a per-case scalar so impact_velocity_feature can be
         # smoke-tested end-to-end (varies by case to exercise the broadcast).
         loading_scalar=lambda cid: 100.0 + float(cid.rsplit("_", 1)[1]),
+        # ADR-0058: a per-case 3-vector so loading_features can be
+        # smoke-tested end-to-end (varies by case to exercise the broadcast).
+        # Coexists with loading_scalar above -- a run picks at most one via
+        # its config, so defining both extractors on one spec is safe.
+        loading_scalars=lambda cid: (
+            float(cid.rsplit("_", 1)[1]),
+            1.0,
+            2.0,
+        ),
     )
 
 
@@ -92,6 +102,7 @@ def _run_transolver_smoke(
     *,
     frames_per_call: int = 1,
     impact_velocity_feature: bool = False,
+    loading_features: int = 0,
     time_conditioned: bool = False,
 ):
     """Shared spec/data/train setup for both smoke tests below.
@@ -127,6 +138,7 @@ def _run_transolver_smoke(
         normalizer_warmup_steps=5,
         frames_per_call=frames_per_call,
         impact_velocity_feature=impact_velocity_feature,
+        loading_features=loading_features,
         time_conditioned=time_conditioned,
         # time-conditioning is history-free / non-autoregressive: noise is inert
         noise_std=0.0 if time_conditioned else TransolverConfig().noise_std,
@@ -398,3 +410,62 @@ def test_transolver_impact_velocity_feature_train_and_evaluate_smoke(
     per_case = metrics["cases"][ids["val"][0]]
     assert np.isfinite(per_case["one_step_position_rmse"])
     assert np.isfinite(per_case["rollout_position_rmse"])
+
+
+def test_transolver_loading_features_train_and_evaluate_smoke(tmp_path, monkeypatch):
+    """ADR-0058: the N-scalar loading-feature channel trains + evaluates end-to-end.
+
+    Mirrors ``test_transolver_impact_velocity_feature_train_and_evaluate_smoke``
+    with the generalized (3-wide) loading vector instead of the single scalar:
+    per-trajectory loading_scalar_vectors -> collate loading_feature ->
+    forward_train (node_in + 3) -> val/eval bind_case vector -> predict_positions
+    broadcast.
+    """
+    import structbench.cli.train as cli_train
+    from structbench.models.transolver import TransolverSimulator
+
+    spec, data_root, out, _cfg, _tcfg, ids = _run_transolver_smoke(
+        tmp_path, loading_features=3
+    )
+
+    record = json.loads((out / "config.json").read_text(encoding="utf-8"))
+    assert record["model"]["loading_features"] == 3
+
+    # the checkpoint's node input carries the extra 3 global channels
+    # (node_in+3): loads only into a feature-on simulator of the matching width.
+    sim = TransolverSimulator(
+        dim=3,
+        hidden_dim=16,
+        n_layers=2,
+        n_heads=2,
+        slice_num=8,
+        loading_features=3,
+    )
+    sim.load(sorted(out.glob("model-*.pt"))[-1])
+    assert sim._node_normalizer._sum.shape[0] == sim._node_type_size + 3 * 3 + 3
+
+    monkeypatch.setattr(cli_train, "get_benchmark", lambda name: spec)
+    metrics = cli_train.evaluate(ids["val"], data_root, out, "cpu", split_name="val")
+    per_case = metrics["cases"][ids["val"][0]]
+    assert np.isfinite(per_case["one_step_position_rmse"])
+    assert np.isfinite(per_case["rollout_position_rmse"])
+
+
+def test_transolver_loading_features_and_impact_velocity_feature_conflict(tmp_path):
+    """ADR-0058: the two scalar-loading conventions are mutually exclusive."""
+    ids = {"train": ["train_0000"], "val": ["val_0000"]}
+    spec = _mini_spec(ids)
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    _write_cases(data_root, [c for v in ids.values() for c in v])
+    cfg = TransolverConfig(
+        hidden_dim=16,
+        n_layers=2,
+        n_heads=2,
+        slice_num=8,
+        impact_velocity_feature=True,
+        loading_features=3,
+    )
+    tcfg = TrainConfig(benchmark="TransolverSmoke", batch_size=1, training_steps=1)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        train(spec, cfg, tcfg, data_root, tmp_path / "run", "cpu", family="transolver")

@@ -251,3 +251,41 @@ def test_sph_trajectory_leaves_mesh_fields_none(tmp_path):
     traj = load_case_trajectory(_sph_case(tmp_path))  # the file's existing helper
     assert traj.cells is None
     assert traj.reference_coords is None
+
+
+def test_mesh_trajectory_dimensionless_aux_field_is_unscaled(tmp_path):
+    """ADR-0058 regression: a dimensionless mesh aux field (e.g.
+    effective_plastic_strain) must NOT be multiplied by stress_scale --
+    caught by comparing against real data (values ~1.998 collapsed to
+    ~2e-6 before this fix, the Pa->MPa 1e-6 factor applied where it must
+    not be)."""
+    rng = np.random.default_rng(5)
+    n_nodes, n_cells, T = 5, 2, 3
+    coords = rng.random((n_nodes, 3))
+    disp = np.zeros((T, n_nodes, 3), dtype=np.float32)
+    eps = rng.random((T, n_nodes, 1)).astype(np.float32) * 2.0  # O(1), not O(1e6)
+    case = Case(
+        metadata=Metadata(case_id="eps-t", dimension=3, source_units="t-mm-s"),
+        nodes=Nodes(
+            coords=coords,
+            node_id=np.arange(n_nodes, dtype=np.int64),
+            node_type=np.zeros(n_nodes, dtype=np.int64),
+            reference_coords=coords.copy(),
+        ),
+        elements={
+            "shell": ElementBlock(
+                connectivity=rng.integers(0, n_nodes, (n_cells, 4)).astype(np.int64),
+                element_id=np.arange(n_cells, dtype=np.int64),
+                part_id=np.zeros(n_cells, dtype=np.int64),
+            )
+        },
+        materials=[Material(material_id=1, source_model="MAT_TEST", source_params={})],
+        response=Response(
+            time=np.arange(T, dtype=np.float64),
+            node={"displacement": disp, "effective_plastic_strain": eps},
+        ),
+    )
+    path = tmp_path / "eps-t.h5"
+    write_case(case, path)
+    traj = load_case_trajectory(path, aux_field="effective_plastic_strain")
+    np.testing.assert_allclose(traj.aux, eps[:, :, 0], rtol=1e-5)

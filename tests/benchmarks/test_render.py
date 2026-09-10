@@ -4,7 +4,7 @@ import re
 from dataclasses import replace
 from pathlib import Path
 
-from structbench.benchmarks import available_benchmarks, get_benchmark
+from structbench.benchmarks import get_benchmark, public_benchmarks
 from structbench.benchmarks.render import (
     _baseline_line,
     _col_label,
@@ -21,7 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _all_specs():
-    return [get_benchmark(name) for name in available_benchmarks()]
+    return [get_benchmark(name) for name in public_benchmarks()]
 
 
 def _bare_spec():
@@ -146,7 +146,7 @@ def test_committed_index_is_up_to_date():
 
 
 def test_committed_benchmark_pages_are_up_to_date():
-    for name in available_benchmarks():
+    for name in public_benchmarks():
         page = REPO_ROOT / "docs" / "benchmarks" / f"{name}.md"
         assert page.read_text(encoding="utf-8") == render_benchmark_page(
             get_benchmark(name), name
@@ -155,7 +155,7 @@ def test_committed_benchmark_pages_are_up_to_date():
 
 def test_index_links_to_each_benchmark_page():
     text = render_index(_all_specs())
-    for name in available_benchmarks():
+    for name in public_benchmarks():
         assert f"(benchmarks/{name}.md)" in text, name
 
 
@@ -215,7 +215,7 @@ def test_blessed_page_quickstart_trains_the_blessed_family():
 
 
 def test_card_figure_paths_exist():
-    for name in available_benchmarks():
+    for name in public_benchmarks():
         for fig in get_benchmark(name).card.figures:
             assert (REPO_ROOT / fig.path).is_file(), f"{name}: missing {fig.path}"
 
@@ -617,7 +617,7 @@ def test_quickstart_config_path_exists_for_every_benchmark():
     # -- a family with no committed grouped config on disk. For every
     # registered benchmark, the family the renderer actually selects must
     # have a real configs/<name>/<family>.toml on disk.
-    for name in available_benchmarks():
+    for name in public_benchmarks():
         spec = get_benchmark(name)
         text = render_benchmark_page(spec, name)
         match = re.search(r"--config (configs/\S+\.toml)", text)
@@ -688,7 +688,7 @@ def test_archive_readme_quickstart_family_follows_blessed_first():
     # provisional entry, else the spec default) — NOT raw declaration order.
     # Taylor now declares MGN (provisional) first, but the CGN blessed baseline
     # must still anchor the quickstart; the render must thread the same choice.
-    for name in available_benchmarks():
+    for name in public_benchmarks():
         spec = get_benchmark(name)
         family, _ = _quickstart_family(spec)
         text = render_archive_readme(spec, name)

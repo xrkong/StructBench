@@ -352,6 +352,62 @@ def test_impact_velocity_feature_predicts_with_bound_scalar():
     assert nxt.shape == (P, 3) and aux.shape == (P, 1)
 
 
+# --- ADR-0058: N-scalar loading_features (impact_velocity_feature generalized) ---
+
+
+def test_loading_features_widens_node_in_by_n():
+    off = _tiny_sim(loading_features=0)
+    on = _tiny_sim(loading_features=4)
+    assert on._node_normalizer._sum.shape[0] == off._node_normalizer._sum.shape[0] + 4
+    assert on._net.preprocess[0].in_features == off._net.preprocess[0].in_features + 4
+
+
+def test_loading_features_and_impact_velocity_feature_are_mutually_exclusive():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _tiny_sim(loading_features=4, impact_velocity_feature=True)
+
+
+def test_loading_features_requires_bound_vector():
+    # feature on, but bind_case supplied no loading_scalars -> loud error, not
+    # a silent zero channel.
+    sim, gt, types = _bound_sim(loading_features=4)  # binds without vector
+    npp = torch.tensor([5])
+    win = gt[0:2].permute(1, 0, 2).contiguous()
+    with pytest.raises(RuntimeError, match="loading_scalars"):
+        sim.predict_positions(win, npp, types)
+
+
+def test_loading_features_predicts_with_bound_vector():
+    torch.manual_seed(0)
+    rng = np.random.default_rng(0)
+    P = 5
+    sim = _tiny_sim(loading_features=4)
+    cells = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.int64)
+    ref = torch.tensor(rng.random((P, 3)), dtype=torch.float32)
+    types = torch.tensor([0, 0, 1, 3, 0], dtype=torch.int64)
+    gt = torch.tensor(rng.random((6, P, 3)), dtype=torch.float32).cumsum(0)
+    sim.bind_case(cells, ref, types, gt, loading_scalars=(1.0, 0.0, 2.5, 0.0))
+    nxt, aux = sim.predict_positions(
+        gt[0:2].permute(1, 0, 2).contiguous(), torch.tensor([P]), types
+    )
+    assert nxt.shape == (P, 3) and aux.shape == (P, 1)
+
+
+def test_loading_features_broadcasts_bound_vector_to_every_row():
+    sim, gt, types = _bound_sim(loading_features=3)
+    sim.bind_case(
+        torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.int64),
+        sim._reference_coords,
+        types,
+        gt,
+        loading_scalars=(1.0, 2.0, 3.0),
+    )
+    feat = sim._loading_feature(sim._reference_coords)
+    assert feat.shape == (5, 3)
+    expected = torch.tensor([1.0, 2.0, 3.0]).expand(5, -1)
+    torch.testing.assert_close(feat, expected)
+
+
 # --- ADR-0053 time-conditioned scheme ---
 
 

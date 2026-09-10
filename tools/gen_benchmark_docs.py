@@ -13,7 +13,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from structbench.benchmarks import available_benchmarks, get_benchmark
+from structbench.benchmarks import get_benchmark, public_benchmarks
 from structbench.benchmarks.render import (
     card_json,
     render_archive_readme,
@@ -28,7 +28,7 @@ PAGES_DIR = REPO_ROOT / "docs" / "benchmarks"
 
 def _targets() -> dict[Path, str]:
     """Every generated markdown file mapped to its expected content."""
-    specs = {n: get_benchmark(n) for n in available_benchmarks()}
+    specs = {n: get_benchmark(n) for n in public_benchmarks()}
     out = {INDEX: render_index(list(specs.values()))}
     for name, spec in specs.items():
         out[PAGES_DIR / f"{name}.md"] = render_benchmark_page(spec, name)

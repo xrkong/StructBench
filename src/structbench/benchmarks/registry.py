@@ -33,6 +33,17 @@ _MODULES: dict[str, str] = {
     "vehicle_barrier_crash_3d": "structbench.benchmarks.vehicle_barrier_crash_3d",
 }
 
+#: Registered benchmarks excluded from the public portfolio (ADR-0058, a
+#: narrow amendment to ADR-0056's "register normally or not at all" stance):
+#: unlike notch_beam_2d_bend (unblessed but shareable, ADR-0056), this
+#: benchmark's underlying data is permanently private and not distributable
+#: (ADR-0040 does not apply), so it must never surface in generated public
+#: docs/landing pages even once it carries real data. `get_benchmark()` still
+#: resolves it by name (needed for structbench-train to run against it) --
+#: only `public_benchmarks()` (doc generation, portfolio-wide "every public
+#: benchmark" invariants) excludes it.
+_UNLISTED: frozenset[str] = frozenset({"vehicle_barrier_crash_3d"})
+
 
 @dataclass(frozen=True)
 class BenchmarkSpec:
@@ -114,6 +125,16 @@ class BenchmarkSpec:
     per-node velocity history. ``None`` when the benchmark has no such scalar
     (e.g. actuator-driven deforming-plate), in which case a run that requests
     the feature is rejected at train time."""
+    loading_scalars: Callable[[str], tuple[float, ...]] | None = None
+    """Maps a case id to a fixed-length tuple of scalar loading parameters
+    (e.g. per-layer barrier thicknesses), consumed by the Transolver
+    ``loading_features`` knob (ADR-0058): the same operator-learning
+    convention as ``loading_scalar``, generalized from one scalar to a
+    fixed-size vector. Mutually exclusive with ``loading_scalar`` at the
+    per-run config level (a run picks at most one of ``impact_velocity_feature``
+    / ``loading_features``), so a benchmark may define both extractors without
+    conflict. ``None`` when the benchmark has no such vector, in which case a
+    run that requests ``loading_features`` is rejected at train time."""
 
     def __post_init__(self) -> None:
         for required in ("train", "val"):
@@ -186,6 +207,18 @@ class BenchmarkSpec:
 def available_benchmarks() -> tuple[str, ...]:
     """Registered benchmark names, sorted."""
     return tuple(sorted(_MODULES))
+
+
+def public_benchmarks() -> tuple[str, ...]:
+    """Registered benchmark names minus :data:`_UNLISTED`, sorted (ADR-0058).
+
+    Use this, not :func:`available_benchmarks`, for anything portfolio-facing:
+    generated docs/landing pages, and "every public benchmark satisfies X"
+    tests. ``get_benchmark()`` still resolves an unlisted name -- the
+    training pipeline works normally against it -- only its presence in the
+    public-facing surface is suppressed.
+    """
+    return tuple(sorted(set(_MODULES) - _UNLISTED))
 
 
 def get_benchmark(name: str) -> BenchmarkSpec:

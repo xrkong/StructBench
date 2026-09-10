@@ -269,6 +269,17 @@ class TransolverConfig:
         the ``k>1`` bundling axis: requires ``history_frames=0`` and
         ``frames_per_call=1`` (enforced at config load and simulator
         construction); composes with ``impact_velocity_feature``.
+    loading_features : int
+        Append the case's ``N`` scalar loading parameters (resolved per case
+        via the benchmark spec's ``loading_scalars``, e.g. a fixed-length
+        vector of barrier layer thicknesses) as ``N`` global node-feature
+        channels broadcast to every node — the same operator-learning
+        convention as ``impact_velocity_feature``, generalized from one scalar
+        to a fixed-size vector. ``0`` (default) is byte-identical to the
+        pre-existing recipe and adds no channels. Mutually exclusive with
+        ``impact_velocity_feature`` (enforced at simulator construction): a
+        benchmark's per-case scalar loading feature is either the single
+        ``loading_scalar`` or the vector ``loading_scalars``, never both.
     adaptive_temperature : bool
         Transolver++ eidetic-state edit #1 (ADR-0057): replace the single
         learned per-head temperature scalar with a per-point, per-head
@@ -302,6 +313,7 @@ class TransolverConfig:
     history_frames: int = 0
     frames_per_call: int = 1
     impact_velocity_feature: bool = False
+    loading_features: int = 0
     time_conditioned: bool = False
     adaptive_temperature: bool = False
     slice_reparam: bool = False

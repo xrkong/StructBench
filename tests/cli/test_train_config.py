@@ -256,6 +256,7 @@ max_grad_norm = 0.1
 history_frames = 0
 frames_per_call = 1
 impact_velocity_feature = false
+loading_features = 0
 time_conditioned = false
 adaptive_temperature = false
 slice_reparam = false
@@ -307,6 +308,14 @@ def test_load_run_config_transolver_impact_velocity_feature_roundtrips(tmp_path)
         "impact_velocity_feature = false", "impact_velocity_feature = true"
     )
     assert load_run_config(_write(tmp_path, on)).model.impact_velocity_feature is True
+
+
+def test_load_run_config_transolver_loading_features_roundtrips(tmp_path):
+    # ADR-0058: default off (0); explicit N round-trips.
+    rc = load_run_config(_write(tmp_path, VALID_TRANSOLVER))
+    assert rc.model.loading_features == 0
+    on = VALID_TRANSOLVER.replace("loading_features = 0", "loading_features = 4")
+    assert load_run_config(_write(tmp_path, on)).model.loading_features == 4
 
 
 def test_load_run_config_time_conditioned_roundtrips(tmp_path):

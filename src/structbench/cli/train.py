@@ -432,6 +432,7 @@ def build_transolver_simulator(
         # 0 never reaches here.
         frames_per_call=cfg.frames_per_call,
         impact_velocity_feature=cfg.impact_velocity_feature,
+        loading_features=cfg.loading_features,
         time_conditioned=cfg.time_conditioned,
         adaptive_temperature=cfg.adaptive_temperature,
         slice_reparam=cfg.slice_reparam,
@@ -1485,6 +1486,69 @@ def _transolver_pushforward(
     )
 
 
+def _resolve_transolver_loading(
+    spec: BenchmarkSpec, cfg: TransolverConfig, trajs: list[CaseTrajectory]
+) -> tuple[list[float] | None, list[tuple[float, ...]] | None]:
+    """Resolve per-trajectory Transolver loading scalar(s) from ``cfg``'s flags.
+
+    Reads whichever of ``cfg.impact_velocity_feature`` (ADR-0051 B, one
+    scalar) or ``cfg.loading_features`` (ADR-0058, N scalars) is set --
+    mutually exclusive, enforced at :class:`TransolverSimulator` construction
+    -- and resolves the benchmark spec's matching extractor
+    (``loading_scalar`` / ``loading_scalars``) over every trajectory. Both
+    return values are ``None`` when neither knob is set.
+    """
+    loading_scalars: list[float] | None = None
+    if cfg.impact_velocity_feature:
+        if spec.loading_scalar is None:
+            raise ValueError(
+                f"benchmark {spec.card.name!r} has no loading_scalar (scalar "
+                "impact-velocity parameter), but the transolver config sets "
+                "impact_velocity_feature=True (ADR-0051 B)."
+            )
+        loading_scalars = [spec.loading_scalar(tr.case_id) for tr in trajs]
+
+    loading_scalar_vectors: list[tuple[float, ...]] | None = None
+    if cfg.loading_features:
+        if spec.loading_scalars is None:
+            raise ValueError(
+                f"benchmark {spec.card.name!r} has no loading_scalars "
+                "(multi-scalar loading feature), but the transolver config "
+                f"sets loading_features={cfg.loading_features} (ADR-0058)."
+            )
+        loading_scalar_vectors = [spec.loading_scalars(tr.case_id) for tr in trajs]
+        for tr, vals in zip(trajs, loading_scalar_vectors, strict=True):
+            if len(vals) != cfg.loading_features:
+                raise ValueError(
+                    f"spec.loading_scalars({tr.case_id!r}) returned "
+                    f"{len(vals)} values but cfg.loading_features="
+                    f"{cfg.loading_features}"
+                )
+    return loading_scalars, loading_scalar_vectors
+
+
+def _transolver_bind_loading(
+    spec: BenchmarkSpec, cfg: TransolverConfig, case_id: str
+) -> tuple[float | None, tuple[float, ...] | None]:
+    """Per-case ``bind_case`` loading value(s), mirroring
+    :func:`_resolve_transolver_loading`. Returns ``(loading_scalar,
+    loading_scalars)``, passed to ``bind_case`` by keyword at the call site
+    (not splatted -- a dict typed to hold either value loses the per-key
+    type distinction ``bind_case`` needs).
+    """
+    loading_scalar = (
+        spec.loading_scalar(case_id)
+        if cfg.impact_velocity_feature and spec.loading_scalar
+        else None
+    )
+    loading_scalars = (
+        spec.loading_scalars(case_id)
+        if cfg.loading_features and spec.loading_scalars
+        else None
+    )
+    return loading_scalar, loading_scalars
+
+
 def _train_transolver(
     spec: BenchmarkSpec,
     cfg: TransolverConfig,
@@ -1620,18 +1684,12 @@ def _train_transolver(
         )
 
     statics = [mesh_static_from_trajectory(tr) for tr in train_trajs]
-    # ADR-0051 B: per-trajectory scalar loading parameter (impact velocity),
-    # resolved from the benchmark spec; None (and no extra channel) when the
-    # feature is off.
-    loading_scalars: list[float] | None = None
-    if cfg.impact_velocity_feature:
-        if spec.loading_scalar is None:
-            raise ValueError(
-                f"benchmark {spec.card.name!r} has no loading_scalar (scalar "
-                "impact-velocity parameter), but the transolver config sets "
-                "impact_velocity_feature=True (ADR-0051 B)."
-            )
-        loading_scalars = [spec.loading_scalar(tr.case_id) for tr in train_trajs]
+    # ADR-0051 B / ADR-0058: per-trajectory scalar loading parameter(s)
+    # (impact velocity, or a loading_features vector), resolved from the
+    # benchmark spec; None (and no extra channel) when neither feature is on.
+    loading_scalars, loading_scalar_vectors = _resolve_transolver_loading(
+        spec, cfg, train_trajs
+    )
     sim = build_transolver_simulator(
         cfg,
         kinematic_types=spec.kinematic_types,
@@ -1674,7 +1732,10 @@ def _train_transolver(
         batch_size=train_cfg.batch_size,
         shuffle=True,
         collate_fn=functools.partial(
-            collate_mesh_samples, statics=statics, loading_scalars=loading_scalars
+            collate_mesh_samples,
+            statics=statics,
+            loading_scalars=loading_scalars,
+            loading_scalar_vectors=loading_scalar_vectors,
         ),
     )
     optimizer = torch.optim.AdamW(
@@ -1788,17 +1849,16 @@ def _train_transolver(
                 pos_losses: list[float] = []
                 with torch.no_grad():
                     for tr in val_trajs:
+                        case_scalar, case_scalars = _transolver_bind_loading(
+                            spec, cfg, tr.case_id
+                        )
                         sim.bind_case(
                             torch.from_numpy(tr.cells).to(device),
                             torch.from_numpy(tr.reference_coords).to(device),
                             torch.from_numpy(tr.particle_type).to(device),
                             torch.from_numpy(tr.positions).to(device),
-                            loading_scalar=(
-                                spec.loading_scalar(tr.case_id)
-                                if getattr(cfg, "impact_velocity_feature", False)
-                                and spec.loading_scalar
-                                else None
-                            ),
+                            loading_scalar=case_scalar,
+                            loading_scalars=case_scalars,
                         )
                         sim.reset_rollout()
                         result = rollout(
@@ -1970,15 +2030,9 @@ def _train_transolver_tc(
             h1_neighbors,
         )
 
-    loading_scalars: list[float] | None = None
-    if cfg.impact_velocity_feature:
-        if spec.loading_scalar is None:
-            raise ValueError(
-                f"benchmark {spec.card.name!r} has no loading_scalar (scalar "
-                "impact-velocity parameter), but the transolver config sets "
-                "impact_velocity_feature=True (ADR-0051 B / ADR-0054)."
-            )
-        loading_scalars = [spec.loading_scalar(tr.case_id) for tr in train_trajs]
+    loading_scalars, loading_scalar_vectors = _resolve_transolver_loading(
+        spec, cfg, train_trajs
+    )
 
     min_len = min(int(tr.positions.shape[0]) for tr in train_trajs)
     time_ref = _tc_time_ref_frames(spec.scored_frames, train_cfg.train_frames, min_len)
@@ -2034,6 +2088,7 @@ def _train_transolver_tc(
             collate_mesh_samples,
             statics=statics,
             loading_scalars=loading_scalars,
+            loading_scalar_vectors=loading_scalar_vectors,
             include_target_frame=True,
         ),
     )
@@ -2145,16 +2200,16 @@ def _train_transolver_tc(
                 pos_losses: list[float] = []
                 with torch.no_grad():
                     for tr in val_trajs:
+                        case_scalar, case_scalars = _transolver_bind_loading(
+                            spec, cfg, tr.case_id
+                        )
                         sim.bind_case(
                             torch.from_numpy(tr.cells).to(device),
                             torch.from_numpy(tr.reference_coords).to(device),
                             torch.from_numpy(tr.particle_type).to(device),
                             torch.from_numpy(tr.positions).to(device),
-                            loading_scalar=(
-                                spec.loading_scalar(tr.case_id)
-                                if cfg.impact_velocity_feature and spec.loading_scalar
-                                else None
-                            ),
+                            loading_scalar=case_scalar,
+                            loading_scalars=case_scalars,
                         )
                         val_time_ref = _tc_time_ref_frames(
                             spec.scored_frames,
@@ -2987,6 +3042,12 @@ def evaluate(
                     spec.loading_scalar(case_id)
                     if getattr(model_cfg, "impact_velocity_feature", False)
                     and spec.loading_scalar
+                    else None
+                ),
+                loading_scalars=(
+                    spec.loading_scalars(case_id)
+                    if getattr(model_cfg, "loading_features", 0)
+                    and spec.loading_scalars
                     else None
                 ),
             )

@@ -101,6 +101,7 @@ class TransolverSimulator(CaseBoundSimulator):
         history_velocities: int = 0,
         frames_per_call: int = 1,
         impact_velocity_feature: bool = False,
+        loading_features: int = 0,
         time_conditioned: bool = False,
         adaptive_temperature: bool = False,
         slice_reparam: bool = False,
@@ -138,6 +139,22 @@ class TransolverSimulator(CaseBoundSimulator):
         # default (byte-identical). Distinct from velocity_history (per-node
         # velocity window); this is the operator-learning/one-shot convention.
         self._impact_velocity_feature = impact_velocity_feature
+        # ADR-0058: generalizes impact_velocity_feature from one scalar to a
+        # fixed-size N-vector (e.g. barrier layer thicknesses), broadcast the
+        # same way. Mutually exclusive with impact_velocity_feature -- a run
+        # picks at most one scalar-loading convention -- so _loading_channels
+        # collapses both into a single width the rest of this class reads
+        # uniformly, keeping every downstream branch feature-agnostic.
+        if loading_features and impact_velocity_feature:
+            raise ValueError(
+                "loading_features and impact_velocity_feature are mutually "
+                f"exclusive (got loading_features={loading_features}, "
+                "impact_velocity_feature=True)"
+            )
+        self._loading_features = loading_features
+        self._loading_channels = loading_features or (
+            1 if impact_velocity_feature else 0
+        )
         # ADR-0054: faithful thuml time-conditioned (Time_Input) scheme. The
         # model maps (static geometry, node types, scalar impact velocity?,
         # scripted BC displacement at t, query time t) -> absolute state at t;
@@ -160,13 +177,13 @@ class TransolverSimulator(CaseBoundSimulator):
             # TC input = one_hot + reference coords + scripted-BC displacement
             # at t (+ scalar impact velocity). No current-position or velocity
             # window channels: the geometry is static and time enters additively.
-            node_in = node_type_size + 2 * dim + (1 if impact_velocity_feature else 0)
+            node_in = node_type_size + 2 * dim + self._loading_channels
         else:
             node_in = (
                 node_type_size
                 + 3 * dim
                 + history_velocities * dim
-                + (1 if impact_velocity_feature else 0)
+                + self._loading_channels
             )
 
         self._net = TransolverNet(
@@ -259,26 +276,37 @@ class TransolverSimulator(CaseBoundSimulator):
                     "feature was supplied"
                 )
             parts.append(velocity_history)
-        if self._impact_velocity_feature:
+        if self._loading_channels:
             if loading_feature is None:
                 raise ValueError(
-                    "simulator was built with impact_velocity_feature=True but "
-                    "no loading_feature (case impact-velocity scalar) was "
-                    "supplied"
+                    "simulator was built with impact_velocity_feature=True or "
+                    "loading_features>0 but no loading_feature (case scalar "
+                    "loading channel(s)) was supplied"
                 )
             parts.append(loading_feature)
         return torch.cat(parts, dim=-1)
 
     def _loading_feature(self, ref: Tensor) -> Tensor | None:
-        """Broadcast the bound case's scalar loading parameter to ``(P, 1)``.
+        """Broadcast the bound case's scalar loading parameter(s) to ``(P, N)``.
 
-        Returns ``None`` when ``impact_velocity_feature`` is off (ADR-0051 B).
-        Used on the eval path, where the scalar comes from
+        Returns ``None`` when neither ``impact_velocity_feature`` nor
+        ``loading_features`` is on (ADR-0051 B / ADR-0058). Used on the eval
+        path, where the scalar(s) come from
         :meth:`~.CaseBoundSimulator.bind_case`; the training path passes its
         own collated ``loading_feature`` instead.
         """
-        if not self._impact_velocity_feature:
+        if not self._loading_channels:
             return None
+        if self._loading_features:
+            if self._loading_scalars is None:
+                raise RuntimeError(
+                    "loading_features>0 but bind_case() supplied no "
+                    "loading_scalars for this case"
+                )
+            vals = torch.as_tensor(
+                self._loading_scalars, dtype=ref.dtype, device=ref.device
+            )
+            return vals.unsqueeze(0).expand(ref.shape[0], -1)
         if self._loading_scalar is None:
             raise RuntimeError(
                 "impact_velocity_feature is on but bind_case() supplied no "
@@ -606,11 +634,12 @@ class TransolverSimulator(CaseBoundSimulator):
         channels — time enters additively inside the network, not here.
         """
         parts = [one_hot, reference_coords, kinematic_bc]
-        if self._impact_velocity_feature:
+        if self._loading_channels:
             if loading_feature is None:
                 raise ValueError(
-                    "simulator was built with impact_velocity_feature=True but "
-                    "no loading_feature (case impact-velocity scalar) was supplied"
+                    "simulator was built with impact_velocity_feature=True or "
+                    "loading_features>0 but no loading_feature (case scalar "
+                    "loading channel(s)) was supplied"
                 )
             parts.append(loading_feature)
         return torch.cat(parts, dim=-1)
